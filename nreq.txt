@@ -8,7 +8,7 @@ annotated-types==0.7.0
 antlr4-python3-runtime==4.9.3
 anyio==4.13.0
 attrs==26.1.0
--e file:///mnt/disk1/Framework/newbhaskera/bhaskera
+-e .
 blinker==1.9.0
 cachetools==7.0.5
 certifi==2026.2.25
