@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bhaskera"
+version = "2.0.5"
+description = "Ray-native distributed LLM training framework with FSDP2"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.4",
+"transformers>=4.45,<5.0.0",
+    "ray[train,data]>=2.10",
+    "peft>=0.10",
+    "pyyaml>=6.0",
+    "accelerate>=0.20",
+    "datasets>=2.0",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "tensorboardx>=2.6",
+    "safetensors>=0.4",
+    "tqdm>=4.60",
+    "psutil>=5.9",
+    "packaging>=23.0",
+"omegaconf>=2.3.0"
+]
+
+[project.optional-dependencies]
+wandb  = ["wandb>=0.16"]
+mlflow = ["mlflow>=2.10"]
+flash  = ["flash-attn>=2.5"]
+dev    = ["pytest>=7", "ruff>=0.4"]
+
+[project.scripts]
+bhaskera-train = "bhaskera.launcher.train:main"
+bhaskera-diag  = "bhaskera.launcher.diagnostics:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100

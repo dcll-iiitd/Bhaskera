@@ -1,0 +1,69 @@
+# =============================================================================
+# Bhaskera — Param2 (MoE) config
+#
+# Param2 is a Mixture-of-Experts model with Indic language support.
+# Requires trust_remote_code for custom tokenizer/model code.
+# MoE features are auto-enabled via introspection.
+# =============================================================================
+
+model:
+  name: "bharatgenai/Param2-17B-A2.4B-Thinking"        # ← replace with your exact HF model ID
+  dtype: "bfloat16"
+  attn_impl: null                    # set to "flash_attention_2" if flash-attn installed
+  trust_remote_code: true      # required for Param2 custom code
+
+data:
+  name: "ultrachat"
+  seq_len: 2048
+  num_workers: 4
+
+lora:
+  enabled: true
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["auto"]           # auto-discovers linear targets
+  include_experts: false             # set true to LoRA expert FFN layers too
+  freeze_router: true                # freeze MoE gate/router weights
+  modules_to_save: []                # e.g. ["embed_tokens", "lm_head"] to fully train
+
+moe:
+  aux_loss_weight: 0.01
+  router_z_loss_weight: 0.001
+  freeze_router: true
+  log_expert_utilization: true
+  log_every_n_steps: 10
+
+training:
+  batch_size: 2
+  grad_accum: 4
+  lr: 2e-4
+  weight_decay: 0.01
+  max_steps: 1000
+  num_epochs: 1
+  warmup_steps: 100
+  max_grad_norm: 1.0
+
+  distributed:
+    strategy: "fsdp"
+    fsdp:
+      sharding_strategy: "FULL_SHARD"
+      transformer_layer_cls: []      # auto-detect via introspect.py
+      param_dtype: "bfloat16"
+      reduce_dtype: "bfloat16"
+      buffer_dtype: "bfloat16"
+      activation_checkpointing: true
+      cpu_offload: false
+      shard_experts_individually: true
+
+checkpoint:
+  enabled: true
+  save_dir: "./checkpoints"
+  save_interval: 1
+  keep_last_n: 2
+
+logging:
+  tracker: null                      # wandb | mlflow | null
+  project: "bhaskera"
+  run_name: "param2-lora"
+  log_gpu_every_n_steps: 10

@@ -1,0 +1,57 @@
+# =============================================================================
+# Bhaskera — Falcon-7B (dense model) config
+#
+# Demonstrates backward compatibility: same pipeline, same config shape.
+# MoE features are auto-disabled because introspection detects a dense model.
+# =============================================================================
+
+model:
+  name: "tiiuae/falcon-7b"
+  dtype: "bfloat16"            # explicit is fine too
+  attn_impl: null
+  trust_remote_code: false
+
+data:
+  name: "ultrachat"
+  seq_len: 2048
+  num_workers: 2
+
+lora:
+  enabled: true
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["auto"]     # auto-discovers query_key_value for Falcon
+    
+training:
+  batch_size: 4
+  grad_accum: 8
+  lr: 2e-4
+  weight_decay: 0.01
+  max_steps: 1000
+  num_epochs: 1
+  warmup_steps: 100
+  max_grad_norm: 1.0
+
+  distributed:
+    strategy: "fsdp"
+    fsdp:
+      sharding_strategy: "FULL_SHARD"
+      transformer_layer_cls: []    # auto-detect
+      param_dtype: "bfloat16"
+      reduce_dtype: "bfloat16"
+      buffer_dtype: "bfloat16"
+      activation_checkpointing: true
+      cpu_offload: false
+
+checkpoint:
+  enabled: true
+  save_dir: "./checkpoints"
+  save_interval: 1
+  keep_last_n: 2
+
+logging:
+  tracker: null
+  project: "bhaskera"
+  run_name: "falcon-7b-lora"
+  log_gpu_every_n_steps: 10

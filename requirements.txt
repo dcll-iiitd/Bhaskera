@@ -1,0 +1,25 @@
+# Bhaskera — pinned dependencies snapshot
+# Do NOT use this for installation directly.
+# Use: bash setup.sh
+#
+# To regenerate:
+#   uv pip freeze > requirements.txt
+
+accelerate>=0.20
+datasets>=2.0
+numpy>=1.24
+packaging>=23.0
+pandas>=2.0
+peft>=0.10
+psutil>=5.9
+pyyaml>=6.0
+ray[train,data]>=2.10
+safetensors>=0.4
+tensorboardx>=2.6
+torch>=2.4
+tqdm>=4.60
+transformers>=4.45,<5.0.0
+omegaconf>=2.3.0
+# optional
+wandb>=0.16
+mlflow>=2.10
