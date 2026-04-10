@@ -51,9 +51,9 @@ def solve_lloyd_max(
     """Solve the Lloyd-Max optimal quantizer for random-rotated coordinates."""
     try:
         from scipy import integrate as sci
-        _scipy = sci
-    except ImportError:
-        _scipy = None
+        _scipy_quad = sci.quad
+    except (ImportError, AttributeError):
+        _scipy_quad = None
         logger.warning("scipy not found — using Riemann sums (lower accuracy).")
 
     n_levels = 2 ** bits
@@ -67,8 +67,8 @@ def solve_lloyd_max(
         pdf = lambda x: _gaussian_pdf(float(x), sigma2)
 
     def _integrate_scalar(fn, a, b):
-        if _scipy is not None:
-            val, _ = _scipy.integrate.quad(fn, a, b, limit=200)
+        if _scipy_quad is not None:
+            val, _ = _scipy_quad(fn, a, b, limit=200)
             return val
         n = 1000
         dx = (b - a) / n
@@ -140,7 +140,7 @@ class LloydMaxCodebook:
         sigma2 = 1.0 / self.d
         pdf = lambda x: _gaussian_pdf(x, sigma2)
         try:
-            from scipy import integrate as sci
+            from scipy.integrate import quad
             edges = (
                 [self.boundaries[0].item() - 10]
                 + self.boundaries.tolist()
@@ -150,7 +150,7 @@ class LloydMaxCodebook:
             for i in range(self.n_levels):
                 c = self.centroids[i].item()
                 a, b = edges[i], edges[i + 1]
-                d_i, _ = sci.integrate.quad(lambda x: (x - c) ** 2 * pdf(x), a, b)
+                d_i, _ = quad(lambda x: (x - c) ** 2 * pdf(x), a, b)
                 distortion += d_i
             return distortion
         except ImportError:
