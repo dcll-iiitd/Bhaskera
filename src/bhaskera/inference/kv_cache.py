@@ -148,6 +148,20 @@ class BaseKVCache(Cache):
     def advance(self, n: int = 1) -> None:
         pass  # StaticKVCache overrides; TurboQuant tracks internally
 
+    # ------------------------------------------------------------------
+    # HF Cache interface compatibility (transformers >= 4.47)
+    # ------------------------------------------------------------------
+
+    @property
+    def layers(self) -> list:
+        """Shim for newer HF Cache base class .layers attribute check."""
+        return [None] * getattr(self, "num_layers", 0)
+
+    @property
+    def is_compileable(self) -> bool:
+        """Opt out of HF torch.compile auto-detection for custom caches."""
+        return False
+
 
 # ---------------------------------------------------------------------------
 # StaticKVCache — unchanged, just inherits new base
