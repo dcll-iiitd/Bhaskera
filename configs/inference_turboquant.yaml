@@ -1,11 +1,20 @@
-# Bhaskera inference config — TurboQuant KV cache example
-# Run with: bhaskera-infer --config configs/inference_turboquant.yaml \
-#            --prompt "Explain the attention mechanism in transformers"
+# Bhaskera inference config — TurboQuant KV cache (OPTIMIZED v2)
+# ─────────────────────────────────────────────────────────────────
+# Run with:
+#   bhaskera-infer --config configs/inference_turboquant.yaml \
+#                  --prompt "Explain the attention mechanism in transformers"
+#
+# Backend selection (auto, override via env var):
+#   BHASKERA_BACKEND=vllm  bhaskera-infer ...   # force vLLM (best HPC throughput)
+#   BHASKERA_BACKEND=hf    bhaskera-infer ...   # force HF generate()
+#
+# If vLLM is installed on your HPC, it will be picked automatically.
+# Consumer GPU (1 card): HF generate() with TurboQuantKVCache.
 
 model:
-  name: tiiuae/falcon-7b          # HuggingFace model id
-  dtype: bfloat16                  # bfloat16 | float16 | float32 | auto
-  attn_impl: null                  # flash_attention_2 | null
+  name: tiiuae/falcon-7b
+  dtype: bfloat16
+  attn_impl: null             # set flash_attention_2 if flash-attn is installed
   trust_remote_code: false
 
 inference:
@@ -15,33 +24,30 @@ inference:
   top_k: 50
   do_sample: true
   batch_size: 1
-  device: auto                     # auto detects CUDA → MPS → CPU
+  device: auto                # cuda → MPS → CPU
 
-  # KV cache strategy: static | turboquant | none
+  # KV cache strategy
   kv_cache: turboquant
 
-  # TurboQuant settings (Google ICLR 2026 — arXiv:2504.19874)
-  # MSE-only V3: rotation + Lloyd-Max, no QJL (QJL hurts softmax attention)
-  # K4/V2 asymmetric: same 3-bit avg budget as uniform, better quality split
-  # ~4.4× VRAM reduction at 99.5%+ attention cosine similarity
+  # TurboQuant V3 (MSE-only) settings
+  # Reference: arXiv:2504.19874, community-validated V3 (no QJL)
+  # ~4.4× VRAM vs bf16, 99.5%+ attention cosine similarity
   turboquant:
-    key_bits: 4             # bits for keys   (4-bit = ~99.5% cosine sim)
-    value_bits: 2           # bits for values  (2-bit; errors cancel naturally)
-    residual_window: 128    # last N tokens kept in fp16 — critical for quality
-    protected_layers: 2     # first + last N layers at higher precision
+    key_bits: 4               # 4-bit keys  (99.5%+ cosine sim)
+    value_bits: 2             # 2-bit values (errors cancel in softmax)
+    residual_window: 128      # last N tokens kept in fp16 — DO NOT set below 64
+    protected_layers: 2       # first+last N layers at +2 bits precision
 
-  # Speculative decoding (disabled by default — needs a draft model)
   speculative:
     enabled: false
-    draft_model_name: ""    # e.g. Qwen/Qwen2.5-0.5B-Instruct
+    draft_model_name: ""
     num_draft_tokens: 5
 
-  # torch.compile the model for faster decode (requires PyTorch >= 2.1)
+  # torch.compile: set true on A100/H100 for extra ~20% speedup.
+  # Has no effect on consumer GPUs (RTX series) due to recompile overhead.
   torch_compile: false
 
-# Training sections are ignored by the inference engine
-# but kept for config-file compatibility with bhaskera-train
 logging:
   tracker: null
   project: bhaskera
-  run_name: infer-run
+  run_name: infer-turboquant-v2
