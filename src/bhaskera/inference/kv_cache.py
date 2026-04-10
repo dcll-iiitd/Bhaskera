@@ -136,7 +136,23 @@ class BaseKVCache(Cache):
     def reset(self) -> None: ...
 
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
+        """Required by transformers Cache."""
         return self.seq_len
+
+    def get_max_length(self) -> Optional[int]:
+        """Required by transformers Cache."""
+        if hasattr(self, "max_seq_len"):
+            return self.max_seq_len
+        return None
+
+    def get_usable_length(self, new_seq_length: int, layer_idx: Optional[int] = 0) -> int:
+        """Required by transformers Cache."""
+        return self.get_seq_length(layer_idx)
+
+    def get_mask_sizes(self, cache_position=None, layer_idx=None) -> Tuple[int, int]:
+        """Fix for newer Transformers missing `layers` in custom Cache."""
+        seq_len = self.get_seq_length(layer_idx)
+        return seq_len, 0
 
     @property
     @abstractmethod
