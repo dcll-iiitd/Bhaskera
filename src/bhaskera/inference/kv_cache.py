@@ -399,21 +399,22 @@ class _LayerKVStore:
 
     def _decode_range(
         self,
-        idx_block:   torch.Tensor,    # (T, BH, D)  int16
-        norms_block: torch.Tensor,    # (T, BH)     fp16
+        idx_block:   torch.Tensor,
+        norms_block: torch.Tensor,
         cb: FastLloydMaxCodebook,
         B: int, H: int, T: int,
     ) -> torch.Tensor:
-        """Decode T tokens from compressed storage → (B, H, T, D) in self.dtype."""
-        BH = B * H
+        """Decode T tokens from compressed storage -> (B, H, T, D) in self.dtype."""
         D  = self.head_dim
-
-        # (T, BH, D) — bulk lookup, vectorised
-        y_hat = cb.dequantize(idx_block)                             # float32
-        x_unit = self._unrotate(y_hat)                               # (T, BH, D)
-        norms = norms_block.to(torch.float32).unsqueeze(-1)          # (T, BH, 1)
-        x = (x_unit * norms)                                         # (T, BH, D)
-        return x.reshape(T, B, H, D).permute(1, 2, 0, 3).to(self.dtype)  # (B, H, T, D)
+        # Use dims stored at init — NOT the passed B/H args, which can mismatch
+        # for models with GQA (e.g. Falcon num_key_value_heads=71).
+        B_ = self.batch_size
+        H_ = self.num_heads
+        y_hat  = cb.dequantize(idx_block)                        # (T, BH, D) float32
+        x_unit = self._unrotate(y_hat)                           # (T, BH, D)
+        norms  = norms_block.to(torch.float32).unsqueeze(-1)     # (T, BH, 1)
+        x      = x_unit * norms                                  # (T, BH, D)
+        return x.reshape(T, B_, H_, D).permute(1, 2, 0, 3).to(self.dtype)
 
     # ------------------------------------------------------------------ #
     # Public update — called by TurboQuantKVCache                         #
