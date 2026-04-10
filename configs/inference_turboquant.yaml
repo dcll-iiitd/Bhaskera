@@ -1,0 +1,47 @@
+# Bhaskera inference config — TurboQuant KV cache example
+# Run with: bhaskera-infer --config configs/inference_turboquant.yaml \
+#            --prompt "Explain the attention mechanism in transformers"
+
+model:
+  name: tiiuae/falcon-7b          # HuggingFace model id
+  dtype: bfloat16                  # bfloat16 | float16 | float32 | auto
+  attn_impl: null                  # flash_attention_2 | null
+  trust_remote_code: false
+
+inference:
+  max_new_tokens: 512
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 50
+  do_sample: true
+  batch_size: 1
+  device: auto                     # auto detects CUDA → MPS → CPU
+
+  # KV cache strategy: static | turboquant | none
+  kv_cache: turboquant
+
+  # TurboQuant settings (Google ICLR 2026 — arXiv:2504.19874)
+  # MSE-only V3: rotation + Lloyd-Max, no QJL (QJL hurts softmax attention)
+  # K4/V2 asymmetric: same 3-bit avg budget as uniform, better quality split
+  # ~4.4× VRAM reduction at 99.5%+ attention cosine similarity
+  turboquant:
+    key_bits: 4             # bits for keys   (4-bit = ~99.5% cosine sim)
+    value_bits: 2           # bits for values  (2-bit; errors cancel naturally)
+    residual_window: 128    # last N tokens kept in fp16 — critical for quality
+    protected_layers: 2     # first + last N layers at higher precision
+
+  # Speculative decoding (disabled by default — needs a draft model)
+  speculative:
+    enabled: false
+    draft_model_name: ""    # e.g. Qwen/Qwen2.5-0.5B-Instruct
+    num_draft_tokens: 5
+
+  # torch.compile the model for faster decode (requires PyTorch >= 2.1)
+  torch_compile: false
+
+# Training sections are ignored by the inference engine
+# but kept for config-file compatibility with bhaskera-train
+logging:
+  tracker: null
+  project: bhaskera
+  run_name: infer-run
