@@ -281,13 +281,15 @@ class _LayerKVStore:
         dtype: torch.dtype,
         full_precision: bool = False,
     ):
-        self.head_dim   = head_dim
-        self.device     = device
-        self.dtype      = dtype
-        self.batch_size = batch_size
-        self.num_heads  = num_heads
-        self.key_bits   = key_bits   if not full_precision else min(key_bits   + 2, 8)
-        self.value_bits = value_bits if not full_precision else min(value_bits + 2, 8)
+        self.head_dim    = head_dim
+        self.device      = device
+        self.dtype       = dtype
+        self.batch_size  = batch_size          # may be overwritten on first update
+        self.num_heads   = num_heads           # may be overwritten on first update
+        self.max_seq_len = max_seq_len
+        self.key_bits    = key_bits   if not full_precision else min(key_bits   + 2, 8)
+        self.value_bits  = value_bits if not full_precision else min(value_bits + 2, 8)
+        self.rotation_seed = rotation_seed
 
         # Codebooks — on device, built once
         self.k_cb = FastLloydMaxCodebook.get(head_dim, self.key_bits,   device)
@@ -296,25 +298,45 @@ class _LayerKVStore:
         # Rotation — on device, never moved
         self._R = _generate_rotation_matrix(head_dim, seed=rotation_seed, device=device)
 
-        # Pre-allocated compressed storage
-        # max slots = max tokens that could ever be evicted
-        max_comp = max_seq_len
-        BH = batch_size * num_heads
-        self._k_idx   = torch.zeros(max_comp, BH, head_dim, dtype=torch.int16,  device=device)
-        self._k_norms = torch.zeros(max_comp, BH,           dtype=torch.float16, device=device)
-        self._v_idx   = torch.zeros(max_comp, BH, head_dim, dtype=torch.int16,  device=device)
-        self._v_norms = torch.zeros(max_comp, BH,           dtype=torch.float16, device=device)
-        self._comp_ptr = 0   # how many token slots have been written
+        # Pre-allocated compressed storage — lazily initialised on first update()
+        # so we use the real tensor B/H rather than the model-config estimate.
+        self._k_idx:   Optional[torch.Tensor] = None
+        self._k_norms: Optional[torch.Tensor] = None
+        self._v_idx:   Optional[torch.Tensor] = None
+        self._v_norms: Optional[torch.Tensor] = None
+        self._comp_ptr = 0
 
-        # fp16 residual window — dynamically sized, small
-        self._win_k: Optional[torch.Tensor] = None   # (B, H, w, D)
+        # fp16 residual window
+        self._win_k: Optional[torch.Tensor] = None
         self._win_v: Optional[torch.Tensor] = None
 
-        # Incremental decoded cache — built once, extended on each eviction
-        # Shape: (B, H, comp_tokens, D)  in target dtype
+        # Incremental decoded cache
         self._dec_k: Optional[torch.Tensor] = None
         self._dec_v: Optional[torch.Tensor] = None
-        self._dec_tokens = 0   # how many tokens are in _dec_k/_dec_v
+        self._dec_tokens = 0
+        self._allocated  = False   # True after first real tensor seen
+
+    # ------------------------------------------------------------------ #
+    # Lazy allocation — called on first update with the real tensor shape  #
+    # ------------------------------------------------------------------ #
+
+    def _lazy_alloc(self, B: int, H: int) -> None:
+        """Allocate compressed storage using the *actual* B and H from the
+        first tensor seen.  This avoids the Falcon MQA mismatch where the
+        model config reports num_attention_heads=71 but the KV tensors only
+        have 1 head (MQA)."""
+        if self._allocated:
+            return
+        self.batch_size = B
+        self.num_heads  = H
+        BH = B * H
+        D  = self.head_dim
+        mc = self.max_seq_len
+        self._k_idx   = torch.zeros(mc, BH, D, dtype=torch.int16,  device=self.device)
+        self._k_norms = torch.zeros(mc, BH,    dtype=torch.float16, device=self.device)
+        self._v_idx   = torch.zeros(mc, BH, D, dtype=torch.int16,  device=self.device)
+        self._v_norms = torch.zeros(mc, BH,    dtype=torch.float16, device=self.device)
+        self._allocated = True
 
     # ------------------------------------------------------------------ #
     # Rotation helpers                                                     #
@@ -347,11 +369,11 @@ class _LayerKVStore:
             if self._comp_ptr >= self._k_idx.shape[0]:
                 # Grow the pre-allocated tensors (rare — only if max_seq_len underestimated)
                 extra = max(128, self._k_idx.shape[0] // 2)
-                BH = B * H
-                self._k_idx   = torch.cat([self._k_idx,   torch.zeros(extra, BH, D, dtype=torch.int16,  device=self.device)])
-                self._k_norms = torch.cat([self._k_norms, torch.zeros(extra, BH,    dtype=torch.float16, device=self.device)])
-                self._v_idx   = torch.cat([self._v_idx,   torch.zeros(extra, BH, D, dtype=torch.int16,  device=self.device)])
-                self._v_norms = torch.cat([self._v_norms, torch.zeros(extra, BH,    dtype=torch.float16, device=self.device)])
+                BH_ = self.batch_size * self.num_heads
+                self._k_idx   = torch.cat([self._k_idx,   torch.zeros(extra, BH_, D, dtype=torch.int16,  device=self.device)])
+                self._k_norms = torch.cat([self._k_norms, torch.zeros(extra, BH_,    dtype=torch.float16, device=self.device)])
+                self._v_idx   = torch.cat([self._v_idx,   torch.zeros(extra, BH_, D, dtype=torch.int16,  device=self.device)])
+                self._v_norms = torch.cat([self._v_norms, torch.zeros(extra, BH_,    dtype=torch.float16, device=self.device)])
 
             kt = k_flat[t].float()   # (BH, D)
             vt = v_flat[t].float()
@@ -433,6 +455,7 @@ class _LayerKVStore:
         means we only dequantize tokens at eviction time, not at read time.
         """
         B, H, new_len, D = k.shape
+        self._lazy_alloc(B, H)   # no-op after first call
 
         # Extend fp16 window
         if self._win_k is None:
@@ -473,10 +496,11 @@ class _LayerKVStore:
         self._dec_k    = None
         self._dec_v    = None
         self._dec_tokens = 0
-        self._k_idx.zero_()
-        self._k_norms.zero_()
-        self._v_idx.zero_()
-        self._v_norms.zero_()
+        if self._k_idx is not None:
+            self._k_idx.zero_()
+            self._k_norms.zero_()
+            self._v_idx.zero_()
+            self._v_norms.zero_()
 
     def nbytes(self) -> int:
         idx_bytes  = (self._k_idx.numel() + self._v_idx.numel()) * 2       # int16

@@ -226,9 +226,13 @@ class _HFBackend:
 
         mc = self._model.config
         num_layers   = getattr(mc, "num_hidden_layers",      0)
+        # num_key_value_heads is the correct attribute for GQA/MQA models.
+        # Falcon uses MQA (1 KV head) but its config only has num_attention_heads=71.
+        # We pass 1 as the fallback — the cache lazy-allocates from the first
+        # real tensor shape anyway, so this value is only used for log messages.
         num_kv_heads = (getattr(mc, "num_key_value_heads",   None)
-                        or getattr(mc, "num_attention_heads", None)
-                        or getattr(mc, "n_head",              0))
+                        or getattr(mc, "multi_query_group_num", None)  # ChatGLM
+                        or 1)  # MQA / unknown — lazy-alloc corrects at runtime
         hidden_size  = getattr(mc, "hidden_size", None) or getattr(mc, "n_embd", 0)
         num_attn     = getattr(mc, "num_attention_heads", None) or getattr(mc, "n_head", 1)
         head_dim     = hidden_size // num_attn if num_attn else 64
