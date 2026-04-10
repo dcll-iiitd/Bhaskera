@@ -157,7 +157,7 @@ def _tokenize_dataset(
         text_col=text_col,
         trust_remote_code=trust_remote_code,
     )
-
+    ds = ds.repartition(num_workers * 2)
     return ds.map_batches(
         factory,
         batch_format="numpy",

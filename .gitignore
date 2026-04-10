@@ -1,0 +1,19 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# Checkpoints / model outputs
+checkpoints/
+
+# Env
+.venv/
+env/
+
+# Misc
+*.log

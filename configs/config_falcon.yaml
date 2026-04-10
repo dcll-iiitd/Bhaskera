@@ -14,7 +14,7 @@ model:
 data:
   name: "ultrachat"
   seq_len: 2048
-  num_workers: 2
+  num_workers: 8
 
 lora:
   enabled: true
