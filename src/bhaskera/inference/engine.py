@@ -294,15 +294,37 @@ class _HFBackend:
     ) -> List[str]:
         infer_cfg = self._cfg.inference
 
-        # Tokenize (in thread pool — overlaps with any async work upstream)
-        enc_future = _TOKENIZER_POOL.submit(
-            self._tok, prompts,
-            return_tensors="pt", padding=True, truncation=True
-        )
-        enc = enc_future.result()
-        input_ids      = enc["input_ids"].to(self._device)
-        attention_mask = enc["attention_mask"].to(self._device)
-        prompt_len     = input_ids.shape[1]
+        # Tokenize — Param2/thinking models use apply_chat_template
+        if getattr(self, "_is_thinking", False):
+            # apply_chat_template doesn't support batching easily, so process
+            # prompts individually and pad to same length for batched generate
+            all_ids = []
+            for p in prompts:
+                ids = self._tok.apply_chat_template(
+                    [{"role": "user", "content": p}],
+                    return_tensors="pt",
+                    add_generation_prompt=True,
+                )
+                all_ids.append(ids[0])
+            # Pad to max length (left-pad so generation aligns)
+            max_len = max(t.shape[0] for t in all_ids)
+            pad_id  = self._tok.pad_token_id or self._tok.eos_token_id
+            padded  = [
+                torch.cat([torch.full((max_len - t.shape[0],), pad_id, dtype=torch.long), t])
+                for t in all_ids
+            ]
+            input_ids      = torch.stack(padded).to(self._device)
+            attention_mask = (input_ids != pad_id).long()
+            prompt_len     = input_ids.shape[1]
+        else:
+            enc_future = _TOKENIZER_POOL.submit(
+                self._tok, prompts,
+                return_tensors="pt", padding=True, truncation=True
+            )
+            enc = enc_future.result()
+            input_ids      = enc["input_ids"].to(self._device)
+            attention_mask = enc["attention_mask"].to(self._device)
+            prompt_len     = input_ids.shape[1]
 
         # Reset KV cache between requests
         if self._kv_cache is not None:
@@ -326,7 +348,9 @@ class _HFBackend:
             if top_k > 0:
                 gen_kwargs["top_k"]   = top_k
 
-        if self._kv_cache is not None:
+        # Param2: use model's internal cache — custom Cache object causes
+        # degenerate repetition due to incompatibility with param2moe forward.
+        if self._kv_cache is not None and not getattr(self, "_is_param2", False):
             gen_kwargs["past_key_values"] = self._kv_cache
 
         # Use CUDA autocast for AMP

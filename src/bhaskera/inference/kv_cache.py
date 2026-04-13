@@ -602,15 +602,23 @@ class TurboQuantKVCache(BaseKVCache):
         return sum(s.nbytes() for s in self._stores)
 
     def compression_stats(self) -> dict:
-        tq_bytes  = self.memory_bytes()
-        elem      = self.batch_size * self.num_heads * self._seq_len * self.head_dim
-        bf16_bytes = 2 * 2 * self.num_layers * elem
+        tq_bytes = self.memory_bytes()
+        # Derive actual seq_len from the first store's data rather than the
+        # external advance() counter (HF generate() never calls advance()).
+        actual_seq = self._seq_len
+        if actual_seq == 0 and self._stores:
+            s = self._stores[0]
+            comp_toks = s._comp_ptr if s._comp_ptr else 0
+            win_toks  = s._win_k.shape[2] if s._win_k is not None else 0
+            actual_seq = comp_toks + win_toks
+        elem       = self.batch_size * self.num_heads * actual_seq * self.head_dim
+        bf16_bytes = 2 * 2 * self.num_layers * max(elem, 1)
         ratio      = bf16_bytes / tq_bytes if tq_bytes > 0 else 0.0
         return {
             "tq_mb":             tq_bytes / 1e6,
             "bf16_mb":           bf16_bytes / 1e6,
             "compression_ratio": ratio,
-            "seq_len":           self._seq_len,
+            "seq_len":           actual_seq,
         }
 
 
