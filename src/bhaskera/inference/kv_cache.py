@@ -136,23 +136,7 @@ class BaseKVCache(Cache):
     def reset(self) -> None: ...
 
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
-        """Required by transformers Cache."""
         return self.seq_len
-
-    def get_max_length(self) -> Optional[int]:
-        """Required by transformers Cache."""
-        if hasattr(self, "max_seq_len"):
-            return self.max_seq_len
-        return None
-
-    def get_usable_length(self, new_seq_length: int, layer_idx: Optional[int] = 0) -> int:
-        """Required by transformers Cache."""
-        return self.get_seq_length(layer_idx)
-
-    def get_mask_sizes(self, cache_position=None, layer_idx=None) -> Tuple[int, int]:
-        """Fix for newer Transformers missing `layers` in custom Cache."""
-        seq_len = self.get_seq_length(layer_idx)
-        return seq_len, 0
 
     @property
     @abstractmethod
@@ -475,18 +459,18 @@ class _LayerKVStore:
 
         # Extend fp16 window
         if self._win_k is None:
-            self._win_k = k.to(torch.float16)
-            self._win_v = v.to(torch.float16)
+            self._win_k = k.to(self.dtype)
+            self._win_v = v.to(self.dtype)
         else:
-            self._win_k = torch.cat([self._win_k, k.to(torch.float16)], dim=2)
-            self._win_v = torch.cat([self._win_v, v.to(torch.float16)], dim=2)
+            self._win_k = torch.cat([self._win_k, k.to(self.dtype)], dim=2)
+            self._win_v = torch.cat([self._win_v, v.to(self.dtype)], dim=2)
 
         # Evict oldest tokens from window to compressed storage
         win_len = self._win_k.shape[2]
         evict   = win_len - residual_window
         if evict > 0:
-            evict_k = self._win_k[:, :, :evict, :].to(torch.float32)
-            evict_v = self._win_v[:, :, :evict, :].to(torch.float32)
+            evict_k = self._win_k[:, :, :evict, :].float()
+            evict_v = self._win_v[:, :, :evict, :].float()
             self._win_k = self._win_k[:, :, evict:, :]
             self._win_v = self._win_v[:, :, evict:, :]
             # Compress and extend _dec_k/_dec_v
