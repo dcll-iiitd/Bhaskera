@@ -78,6 +78,20 @@ def _resolve_device(device_str: str) -> torch.device:
 # vLLM backend (best-in-class throughput for HPC/multi-GPU)
 # ---------------------------------------------------------------------------
 
+_PARAM2_MODEL_IDS = {
+    "bharatgenai/param2-17b-a2.4b-thinking",
+    "bharatgenai/param2-17b-a2.4b",
+    "bharatgenai/param-2-17b-moe-a2.4b",
+}
+
+def _is_param2_model(model_name: str) -> bool:
+    """Detect Param2 by model id (case-insensitive)."""
+    name_lower = model_name.lower()
+    return (any(name_lower == mid for mid in _PARAM2_MODEL_IDS)
+            or "param2" in name_lower
+            or "param-2" in name_lower)
+
+
 class _VLLMBackend:
     """
     Uses vLLM's PagedAttention for near-optimal GPU utilisation.
@@ -183,6 +197,13 @@ class _HFBackend:
 
         if self._dtype is None:
             self._dtype = next(self._model.parameters()).dtype
+
+        # ── Param2 / thinking-model detection ────────────────────────
+        self._is_param2   = _is_param2_model(model_name)
+        self._is_thinking = self._is_param2
+        if self._is_param2:
+            logger.info("[Engine] Param2-Thinking model detected — "
+                        "enabling thinking parser and MoE-aware KV sizing")
 
         # ── ModelProfile ─────────────────────────────────────────────
         from bhaskera.introspect import introspect_model
@@ -323,13 +344,14 @@ class _HFBackend:
             else:
                 output_ids = self._model.generate(**gen_kwargs)
 
-        # Decode
+        # Decode — thinking models need skip_special_tokens=False to preserve <think> tags
+        skip_sp = not getattr(self, "_is_thinking", False)
         outputs = []
         for i, ids in enumerate(output_ids):
             if return_full_text:
-                text = self._tok.decode(ids, skip_special_tokens=True)
+                text = self._tok.decode(ids, skip_special_tokens=skip_sp)
             else:
-                text = self._tok.decode(ids[prompt_len:], skip_special_tokens=True)
+                text = self._tok.decode(ids[prompt_len:], skip_special_tokens=skip_sp)
             outputs.append(text)
         return outputs
 
@@ -493,6 +515,133 @@ class InferenceEngine:
         if hasattr(self._backend, "kv_cache_stats"):
             return self._backend.kv_cache_stats()
         return None
+
+    # ------------------------------------------------------------------
+    # Param2-Thinking interface
+    # ------------------------------------------------------------------
+
+    @torch.inference_mode()
+    def generate_param2(
+        self,
+        prompts: Union[str, List[str]],
+        system_prompt: str = "You are a helpful assistant.",
+        max_new_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        do_sample: Optional[bool] = None,
+    ) -> List:
+        """
+        Generate with Param2-Thinking and return structured Param2Output objects.
+
+        Automatically applies the chat template, decodes with
+        skip_special_tokens=False (required for <think> tags), and parses
+        reasoning / tool_calls / final_answer from the output.
+
+        Args:
+            prompts:        User message(s).
+            system_prompt:  System turn (default: "You are a helpful assistant.").
+            max_new_tokens: Override config.
+            temperature:    Override config.
+            top_p:          Override config.
+            top_k:          Override config.
+            do_sample:      Override config.
+
+        Returns:
+            List of Param2Output(reasoning, tool_calls, final_answer, raw).
+
+        Example::
+
+            engine = InferenceEngine.from_param2()
+            for out in engine.generate_param2(["Explain quantum entanglement."]):
+                print("THINK:", out.reasoning[:200])
+                print("ANSWER:", out.final_answer)
+        """
+        from bhaskera.inference.param2 import (
+            apply_param2_chat_template,
+            parse_model_output,
+        )
+
+        if not self._loaded:
+            self.load()
+
+        if isinstance(prompts, str):
+            prompts = [prompts]
+
+        backend = self._backend
+        if not hasattr(backend, "_tok"):
+            raise RuntimeError(
+                "generate_param2 requires the HF backend. "
+                "Set BHASKERA_BACKEND=hf to force it."
+            )
+
+        tok = backend._tok
+        g   = self.infer_cfg
+        raw_outputs = []
+
+        for prompt in prompts:
+            input_ids = apply_param2_chat_template(
+                tok, [{"role": "user", "content": prompt}], system_prompt
+            ).to(backend._device)
+
+            gen_kwargs: dict = dict(
+                input_ids      = input_ids,
+                max_new_tokens = max_new_tokens or g.max_new_tokens,
+                do_sample      = do_sample if do_sample is not None else g.do_sample,
+                temperature    = temperature or g.temperature,
+                top_p          = top_p or g.top_p,
+                eos_token_id   = tok.eos_token_id,
+                pad_token_id   = tok.eos_token_id,
+            )
+            _k = top_k if top_k is not None else (g.top_k if g.top_k > 0 else None)
+            if _k:
+                gen_kwargs["top_k"] = _k
+
+            if backend._kv_cache is not None:
+                backend._kv_cache.reset()
+                gen_kwargs["past_key_values"] = backend._kv_cache
+
+            ctx = (torch.autocast(backend._device.type, dtype=backend._dtype)
+                   if backend._device.type in ("cuda", "cpu")
+                   else torch.autocast("cpu", dtype=backend._dtype))
+
+            with ctx:
+                output_ids = backend._model.generate(**gen_kwargs)
+
+            prompt_len = input_ids.shape[1]
+            # CRITICAL: skip_special_tokens=False to keep <think> tags
+            raw_text = tok.decode(output_ids[0][prompt_len:], skip_special_tokens=False)
+            raw_outputs.append(raw_text)
+
+        return [parse_model_output(raw) for raw in raw_outputs]
+
+    @classmethod
+    def from_param2(
+        cls,
+        model_name: str = "bharatgenai/Param2-17B-A2.4B-Thinking",
+        kv_cache:   str = "turboquant",
+        device:     str = "auto",
+        **generation_overrides,
+    ) -> "InferenceEngine":
+        """
+        Convenience constructor — loads Param2 with optimal defaults.
+
+        Example::
+
+            engine = InferenceEngine.from_param2(kv_cache="turboquant")
+            outputs = engine.generate_param2(["What is 2+2?"])
+            print(outputs[0].final_answer)
+        """
+        from bhaskera.inference.param2 import build_param2_config
+        cfg = build_param2_config(
+            model_name=model_name,
+            kv_cache=kv_cache,
+            device=device,
+            **generation_overrides,
+        )
+        engine = cls(cfg)
+        engine.load()
+        return engine
 
     def __repr__(self) -> str:
         backend = getattr(self, "_backend_name", "not loaded")
