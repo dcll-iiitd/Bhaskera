@@ -416,6 +416,9 @@ class _HFBackend:
     def kv_cache_stats(self) -> Optional[dict]:
         if self._kv_cache is None:
             return None
+        # Param2 bypasses our custom cache — nothing was written to it
+        if getattr(self, "_is_param2", False):
+            return None
         if hasattr(self._kv_cache, "compression_stats"):
             return self._kv_cache.compression_stats()
         return {"bytes": self._kv_cache.memory_bytes()}

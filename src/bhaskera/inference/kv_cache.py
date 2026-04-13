@@ -503,12 +503,14 @@ class _LayerKVStore:
             self._v_norms.zero_()
 
     def nbytes(self) -> int:
-        idx_bytes  = (self._k_idx.numel() + self._v_idx.numel()) * 2       # int16
-        norm_bytes = (self._k_norms.numel() + self._v_norms.numel()) * 2   # fp16
-        win_bytes  = 0
+        idx_bytes = 0
+        if self._k_idx is not None:
+            idx_bytes  = (self._k_idx.numel() + self._v_idx.numel()) * 2       # int16
+            idx_bytes += (self._k_norms.numel() + self._v_norms.numel()) * 2   # fp16
+        win_bytes = 0
         if self._win_k is not None:
             win_bytes = (self._win_k.numel() + self._win_v.numel()) * 2
-        return idx_bytes + norm_bytes + win_bytes
+        return idx_bytes + win_bytes
 
 
 class TurboQuantKVCache(BaseKVCache):
