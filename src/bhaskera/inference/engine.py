@@ -94,38 +94,23 @@ def _is_param2_model(model_name: str) -> bool:
 
 class _VLLMBackend:
     """
-    Uses vLLM's PagedAttention for near-optimal GPU utilisation.
-    Automatically selected when `pip install vllm` is present.
-    TurboQuant quantization can be applied at model-load time via vLLM's
-    built-in quantization API (passes through to the CUDA kernels directly).
+    vLLM backend with optional TurboQuant KV compression.
+
+    Delegates to _VLLMTurboQuantBackend which implements:
+      - Native turboquant35/turboquant25 dtype (if mitkox fork installed)
+      - Monkey-patch path (standard pip vLLM ≥0.6.0)
+      - Triton fused rotate+quantize kernels when triton is available
     """
 
     def __init__(self, model_name: str, cfg, device: torch.device):
-        from vllm import LLM, SamplingParams  # type: ignore
-        logger.info(f"[Engine] vLLM backend selected for {model_name}")
+        from bhaskera.inference.vllm_turboquant import _VLLMTurboQuantBackend
 
-        raw_dtype = getattr(cfg.model, "dtype", "bfloat16")
-        dtype_str = "bfloat16" if raw_dtype in ("auto", "bfloat16") else raw_dtype
+        tq_cfg = (cfg.inference.turboquant
+                  if getattr(cfg.inference, "kv_cache", "static") == "turboquant"
+                  else None)
 
-        # Map our turboquant config to vLLM quantization if key_bits≤4
-        quantization = None
-        if getattr(cfg.inference, "kv_cache", "static") == "turboquant":
-            # vLLM natively supports fp8/int4 KV cache via kv_cache_dtype
-            pass  # handled via SamplingParams / engine args below
-
-        n_gpus = torch.cuda.device_count() if device.type == "cuda" else 1
-        self._llm = LLM(
-            model=model_name,
-            dtype=dtype_str,
-            tensor_parallel_size=n_gpus,
-            trust_remote_code=cfg.model.trust_remote_code,
-            max_model_len=getattr(cfg.inference, "max_new_tokens", 512) + 4096,
-            gpu_memory_utilization=0.90,
-            # Enable chunked prefill for long prompts (reduces memory spikes)
-            enable_chunked_prefill=True,
-        )
-        self._SamplingParams = SamplingParams
-        self._cfg = cfg
+        self._impl = _VLLMTurboQuantBackend(model_name, cfg, device, tq_cfg)
+        self._is_param2 = False
 
     def generate(
         self,
@@ -135,16 +120,14 @@ class _VLLMBackend:
         top_p: float,
         top_k: int,
         do_sample: bool,
+        return_full_text: bool = False,
     ) -> List[str]:
-        from vllm import SamplingParams  # type: ignore
-        params = SamplingParams(
-            max_tokens=max_new_tokens,
-            temperature=temperature if do_sample else 0.0,
-            top_p=top_p,
-            top_k=top_k if top_k > 0 else -1,
+        return self._impl.generate(
+            prompts, max_new_tokens, temperature, top_p, top_k, do_sample, return_full_text
         )
-        results = self._llm.generate(prompts, params)
-        return [r.outputs[0].text for r in results]
+
+    def kv_cache_stats(self) -> Optional[dict]:
+        return self._impl.kv_cache_stats()
 
 
 # ---------------------------------------------------------------------------
