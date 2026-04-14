@@ -4,7 +4,7 @@ All fields have sane defaults; override via YAML.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
-from typing import Optional
+from typing import List, Optional
 import yaml
 
 
@@ -41,6 +41,57 @@ class MoEConfig:
     freeze_router: bool = True
     log_expert_utilization: bool = True
     log_every_n_steps: int = 10
+
+
+# ---------------------------------------------------------------------------
+# Inference sub-configs
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TurboQuantConfig:
+    """TurboQuant KV-cache quantization (Google, ICLR 2026 — arXiv:2504.19874).
+
+    Uses MSE-only V3 (community-validated): random rotation + Lloyd-Max
+    quantization without QJL residual correction, which hurts in practice
+    because softmax amplifies QJL variance (confirmed by 6+ independent teams).
+
+    K4/V2 asymmetric allocation (same avg 3-bit budget as uniform) gives
+    ~4.4× memory reduction at 99.5%+ attention cosine similarity.
+    """
+    enabled: bool = False
+    key_bits: int = 4          # bits for keys — higher = better attention quality
+    value_bits: int = 2        # bits for values — errors cancel naturally
+    residual_window: int = 128  # last N tokens kept in fp16 (critical for gen quality)
+    protected_layers: int = 2   # first + last N layers use full key_bits+2/value_bits+2
+
+
+@dataclass
+class SpeculativeConfig:
+    """Speculative decoding (Leviathan et al. 2023). Lossless 2–3× decode speedup.
+
+    Requires a small draft model that shares the vocabulary with the target.
+    Draft generates `num_draft_tokens` speculatively; target verifies them
+    in a single forward pass using rejection sampling.
+    """
+    enabled: bool = False
+    draft_model_name: str = ""   # HuggingFace model id for the draft model
+    num_draft_tokens: int = 5    # tokens generated per speculative step
+
+
+@dataclass
+class InferenceConfig:
+    """Inference engine configuration."""
+    max_new_tokens: int = 512
+    temperature: float = 1.0
+    top_p: float = 0.9
+    top_k: int = 50
+    do_sample: bool = True
+    batch_size: int = 1
+    kv_cache: str = "static"          # "static" | "turboquant" | "none"
+    device: str = "auto"               # "auto" | "cuda" | "cpu" | "mps"
+    torch_compile: bool = False        # torch.compile the model for decode speed
+    turboquant: TurboQuantConfig = field(default_factory=TurboQuantConfig)
+    speculative: SpeculativeConfig = field(default_factory=SpeculativeConfig)
 
 
 @dataclass
@@ -120,6 +171,7 @@ class Config:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    inference: InferenceConfig = field(default_factory=InferenceConfig)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -163,6 +215,9 @@ def _dict_to_config(d: dict) -> Config:
     data_raw    = get(raw, 'data', default={})
     lora_raw    = get(raw, 'lora', default={})
     moe_raw     = get(raw, 'moe', default={})
+    infer_raw   = get(raw, 'inference', default={})
+    tq_raw      = get(raw, 'inference', 'turboquant', default={})
+    spec_raw    = get(raw, 'inference', 'speculative', default={})
 
     return Config(
         model=ModelConfig(
@@ -233,6 +288,29 @@ def _dict_to_config(d: dict) -> Config:
             run_name=log_raw.get('run_name', 'run'),
             mlflow_tracking_uri=log_raw.get('mlflow_tracking_uri'),
             log_gpu_every_n_steps=log_raw.get('log_gpu_every_n_steps', 10),
+        ),
+        inference=InferenceConfig(
+            max_new_tokens=infer_raw.get('max_new_tokens', 512),
+            temperature=float(infer_raw.get('temperature', 1.0)),
+            top_p=float(infer_raw.get('top_p', 0.9)),
+            top_k=int(infer_raw.get('top_k', 50)),
+            do_sample=infer_raw.get('do_sample', True),
+            batch_size=int(infer_raw.get('batch_size', 1)),
+            kv_cache=infer_raw.get('kv_cache', 'static'),
+            device=infer_raw.get('device', 'auto'),
+            torch_compile=infer_raw.get('torch_compile', False),
+            turboquant=TurboQuantConfig(
+                enabled=tq_raw.get('enabled', False),
+                key_bits=int(tq_raw.get('key_bits', 4)),
+                value_bits=int(tq_raw.get('value_bits', 2)),
+                residual_window=int(tq_raw.get('residual_window', 128)),
+                protected_layers=int(tq_raw.get('protected_layers', 2)),
+            ),
+            speculative=SpeculativeConfig(
+                enabled=spec_raw.get('enabled', False),
+                draft_model_name=spec_raw.get('draft_model_name', ''),
+                num_draft_tokens=int(spec_raw.get('num_draft_tokens', 5)),
+            ),
         ),
     )
 
