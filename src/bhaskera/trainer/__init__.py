@@ -287,9 +287,16 @@ def _extract_aux_loss(out, profile: ModelProfile) -> Optional[torch.Tensor]:
         for l in router_logits:
             if isinstance(l, tuple) or isinstance(l, list):
                 # Ensure we hit the tensor
-                extracted_logits.append(l[0])
+                l_tensor = l[0]
             else:
-                extracted_logits.append(l)
+                l_tensor = l
+
+            # Flatten (batch, seq_len, num_experts) -> (batch * seq_len, num_experts)
+            # HF's load_balancing_loss_func expects 2D tensors.
+            if l_tensor.dim() == 3:
+                l_tensor = l_tensor.view(-1, l_tensor.shape[-1])
+            
+            extracted_logits.append(l_tensor)
         router_logits = tuple(extracted_logits)
         
         return _load_balancing_loss_from_logits(router_logits, profile)
