@@ -280,9 +280,18 @@ def _extract_aux_loss(out, profile: ModelProfile) -> Optional[torch.Tensor]:
         if aux is not None and isinstance(aux, torch.Tensor):
             return aux
 
-    # router_logits available → compute load balancing loss manually
     router_logits = getattr(out, "router_logits", None)
     if router_logits is not None:
+        # Some custom MoE models return a tuple of tuples: (gate_logits, ...)
+        extracted_logits = []
+        for l in router_logits:
+            if isinstance(l, tuple) or isinstance(l, list):
+                # Ensure we hit the tensor
+                extracted_logits.append(l[0])
+            else:
+                extracted_logits.append(l)
+        router_logits = tuple(extracted_logits)
+        
         return _load_balancing_loss_from_logits(router_logits, profile)
 
     return None
