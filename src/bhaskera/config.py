@@ -96,7 +96,19 @@ class InferenceConfig:
 
 @dataclass
 class DataConfig:
+    source: str = "registry"                  # registry | huggingface | local
     name: str = "ultrachat"                  # dataset registry key
+    hf_dataset: str = ""                      # used when source=huggingface
+    hf_split: str = "train"
+
+    local_path: str = ""                      # file, dir, or glob when source=local
+    local_format: str = "jsonl"               # jsonl | json | csv | parquet | text
+
+    text_column: str = "text"                 # single text column for hf/local tabular data
+    prompt_column: str = ""                   # optional prompt column
+    completion_column: str = ""               # optional completion column
+    prompt_completion_template: str = "{prompt}\n{completion}"
+
     seq_len: int = 2048
     num_workers: int = 4                     # Ray Data parallelism
 
@@ -219,6 +231,15 @@ def _dict_to_config(d: dict) -> Config:
     tq_raw      = get(raw, 'inference', 'turboquant', default={})
     spec_raw    = get(raw, 'inference', 'speculative', default={})
 
+    data_source = data_raw.get('source')
+    if not data_source:
+        if data_raw.get('local_path'):
+            data_source = 'local'
+        elif data_raw.get('hf_dataset'):
+            data_source = 'huggingface'
+        else:
+            data_source = 'registry'
+
     return Config(
         model=ModelConfig(
             name=model_raw.get('name', 'tiiuae/falcon-7b'),
@@ -227,7 +248,18 @@ def _dict_to_config(d: dict) -> Config:
             trust_remote_code=model_raw.get('trust_remote_code', False),
         ),
         data=DataConfig(
+            source=data_source,
             name=data_raw.get('name', 'ultrachat'),
+            hf_dataset=data_raw.get('hf_dataset', ''),
+            hf_split=data_raw.get('hf_split', 'train'),
+            local_path=data_raw.get('local_path', ''),
+            local_format=data_raw.get('local_format', 'jsonl'),
+            text_column=data_raw.get('text_column', 'text'),
+            prompt_column=data_raw.get('prompt_column', ''),
+            completion_column=data_raw.get('completion_column', ''),
+            prompt_completion_template=data_raw.get(
+                'prompt_completion_template', '{prompt}\n{completion}'
+            ),
             seq_len=data_raw.get('seq_len', 2048),
             num_workers=data_raw.get('num_workers', 4),
         ),

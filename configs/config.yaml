@@ -9,7 +9,19 @@ model:
   attn_impl: null            # flash_attention_2 | null
 
 data:
+  source: "registry"        # registry | huggingface | local
   name: "ultrachat"          # ultrachat | openassistant | redpajama
+  hf_dataset: ""             # e.g. "HuggingFaceH4/ultrachat_200k" when source=huggingface
+  hf_split: "train"
+
+  local_path: ""             # file/dir/glob when source=local
+  local_format: "jsonl"      # jsonl | json | csv | parquet | text
+
+  text_column: "text"        # single text column (HF/local tabular sources)
+  prompt_column: ""          # optional prompt column for instruction tuning
+  completion_column: ""      # optional completion column for instruction tuning
+  prompt_completion_template: "{prompt}\n{completion}"
+
   seq_len: 2048
   num_workers: 2             # Ray Data tokenisation parallelism
 
