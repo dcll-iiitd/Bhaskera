@@ -20,6 +20,15 @@ torch>=2.4
 tqdm>=4.60
 transformers>=4.45,<5.0.0
 omegaconf>=2.3.0
+# Triton-fused RMSNorm/RoPE/SwiGLU/CrossEntropy kernels — patches HF
+# modules in-place at load time. Safe no-op on unsupported architectures.
+liger-kernel>=0.5
 # optional
 wandb>=0.16
 mlflow>=2.10
+
+# flash-attn is NOT listed here: it ships a CUDA extension that must be
+# compiled against the already-installed torch wheel, which requires
+# --no-build-isolation. setup.sh installs it in a dedicated step after
+# torch is in place. If you are reproducing this environment manually,
+# run: MAX_JOBS=4 pip install flash-attn --no-build-isolation

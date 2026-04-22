@@ -14,10 +14,14 @@ set -euo pipefail
 
 PROBE_TIMEOUT=120
 
+# Log helpers. All four write to stderr so that functions like detect_cuda
+# and spack_load_cuda — which return a value by echoing to stdout — don't
+# pollute their return value with progress messages when called inside
+# `$(...)` command substitution.
 die()  { echo "❌  $*" >&2; exit 1; }
-info() { echo "ℹ️   $*"; }
-ok()   { echo "✅  $*"; }
-warn() { echo "⚠️   $*"; }
+info() { echo "ℹ️   $*" >&2; }
+ok()   { echo "✅  $*" >&2; }
+warn() { echo "⚠️   $*" >&2; }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FUNCTION: pure-bash version comparison (no bc needed)
@@ -312,19 +316,73 @@ uv pip install torch torchvision torchaudio \
     --quiet
 
 # ── install bhaskera ────────────────────────────────────────────────────────
+# This pulls in liger-kernel (declared in pyproject.toml) too — it's a pure
+# Python package on top of the torch+triton we just installed, so it slots
+# in without any CUDA-compiler dance.
 uv pip install -e "$SCRIPT_DIR[wandb,mlflow]" --quiet
+
+# ── install flash-attn (GPU only, post-torch, out-of-band) ──────────────────
+# flash-attn ships a CUDA extension whose setup.py imports torch at build
+# time. PEP-517 build isolation hides the torch we just installed, so we
+# must pass --no-build-isolation. We also pre-install its build-time deps
+# (packaging, ninja, wheel) into the same env so the build sees them.
+#
+# This step is intentionally:
+#   * skipped on CPU-only setups (nothing to build against)
+#   * capped at MAX_JOBS=4 to avoid OOM-ing the login node during compile
+#   * non-fatal — if the build fails (e.g. nvcc missing on a login node,
+#     or an unsupported GPU arch), the rest of the framework still works
+#     with attn_impl=sdpa or eager. We surface a clear message so the user
+#     can retry on a compute node.
+if [[ "$CUDA_VER" != "cpu" ]]; then
+    echo ""
+    info "Installing flash-attn (CUDA extension — may take several minutes on first build)..."
+
+    # Build-time prerequisites for flash-attn's setup.py.
+    # setuptools is explicit: `uv venv` creates minimal environments without
+    # it, and `--no-build-isolation` means the build sees exactly this env
+    # (no isolated build backend to pull setuptools in behind the scenes).
+    uv pip install setuptools packaging ninja wheel --quiet
+
+    # Cap build parallelism — flash-attn's nvcc jobs are memory-hungry
+    export MAX_JOBS="${MAX_JOBS:-4}"
+
+    if uv pip install flash-attn --no-build-isolation --quiet; then
+        ok "flash-attn installed (MAX_JOBS=$MAX_JOBS)"
+    else
+        warn "flash-attn install failed — training will still work with"
+        warn "  attn_impl: sdpa  (or null/eager) in your config."
+        warn "To retry manually on a GPU/compute node with nvcc on PATH:"
+        warn "  MAX_JOBS=4 uv pip install flash-attn --no-build-isolation"
+    fi
+else
+    info "Skipping flash-attn (CPU-only setup — nothing to build against)"
+fi
 
 # ── smoke test ───────────────────────────────────────────────────────────────
 echo ""
 echo "🔬 Smoke test:"
 python - <<EOF
-import torch, sys
+import importlib, sys, torch
 print(f"   python       : {sys.version.split()[0]}")
 print(f"   torch        : {torch.__version__}")
 print(f"   CUDA built   : {torch.version.cuda}")
 print(f"   CUDA visible : {torch.cuda.is_available()}")
 if not torch.cuda.is_available():
     print("   (no GPU on login node — expected, will work on compute nodes)")
+
+# Report optional accelerators — absence is not a failure.
+try:
+    lk = importlib.import_module("liger_kernel")
+    print(f"   liger-kernel : {getattr(lk, '__version__', 'installed')}")
+except Exception as e:
+    print(f"   liger-kernel : NOT available ({type(e).__name__})")
+
+try:
+    fa = importlib.import_module("flash_attn")
+    print(f"   flash-attn   : {getattr(fa, '__version__', 'installed')}")
+except Exception as e:
+    print(f"   flash-attn   : NOT available ({type(e).__name__})")
 EOF
 
 # ── write portable activate helper ───────────────────────────────────────────

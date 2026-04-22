@@ -26,6 +26,12 @@ class ModelConfig:
     dtype: str = "bfloat16"
     attn_impl: Optional[str] = None
     trust_remote_code: bool = False
+    # Apply Liger Kernel's Triton-fused RMSNorm/RoPE/SwiGLU/CrossEntropy
+    # kernels to the loaded model. Default ON — the patch is a no-op for
+    # architectures Liger does not recognise, and a no-op at runtime if
+    # the `liger-kernel` package is not importable. Set false to force
+    # the vanilla HuggingFace implementation.
+    use_liger_kernel: bool = True
 
 
 @dataclass
@@ -204,6 +210,7 @@ def _dict_to_config(raw: dict) -> Config:
             dtype=model_raw.get("dtype", "bfloat16"),
             attn_impl=model_raw.get("attn_impl"),
             trust_remote_code=model_raw.get("trust_remote_code", False),
+            use_liger_kernel=bool(model_raw.get("use_liger_kernel", True)),
         ),
         data=DataConfig(
             name=data_raw.get("name", "ultrachat"),

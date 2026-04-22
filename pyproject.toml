@@ -22,7 +22,13 @@ dependencies = [
     "tqdm>=4.60",
     "psutil>=5.9",
     "packaging>=23.0",
-"omegaconf>=2.3.0"
+"omegaconf>=2.3.0",
+    # Triton-fused RMSNorm / RoPE / SwiGLU / CrossEntropy kernels.
+    # Pure-python install — safe to pull in alongside the rest of the deps
+    # because torch (its only non-trivial dep) is installed in a previous
+    # step by setup.sh. Unsupported architectures fall back silently to the
+    # standard HuggingFace implementation at runtime.
+    "liger-kernel>=0.5"
 ]
 
 [project.optional-dependencies]

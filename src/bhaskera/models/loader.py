@@ -42,6 +42,52 @@ def register_model(name: str):
     return _wrap
 
 
+def _maybe_apply_liger_kernel(model: torch.nn.Module, cfg) -> bool:
+    """
+    Apply Liger Kernel's Triton-fused RMSNorm / RoPE / SwiGLU / CrossEntropy
+    kernels to an already-instantiated model.
+
+    This is the generalized integration path: `_apply_liger_kernel_to_instance`
+    dispatches on `model.config.model_type`, so it transparently supports every
+    architecture Liger ships (Llama, Mistral, Mixtral, Qwen2/2.5/3, Gemma 1/2/3,
+    Phi3, Granite, Olmo2, and more), and is a safe no-op for anything else.
+    Compatible with FSDP2, DDP, gradient checkpointing, and flash-attn.
+
+    Returns True iff kernels were actually applied. Never raises — a missing
+    package, unsupported architecture, or internal Liger error is downgraded
+    to a warning so training continues on the vanilla HF implementation.
+    """
+    if not getattr(cfg.model, "use_liger_kernel", True):
+        logger.info("Liger Kernel disabled via config (model.use_liger_kernel=false).")
+        return False
+
+    try:
+        from liger_kernel.transformers import _apply_liger_kernel_to_instance
+    except ImportError:
+        logger.warning(
+            "liger-kernel is not installed — falling back to the standard "
+            "HuggingFace kernels. Install with `pip install liger-kernel` "
+            "(or re-run setup.sh) to enable Triton-fused RMSNorm/RoPE/SwiGLU/"
+            "CrossEntropy and unlock ~20% throughput / ~60% memory savings."
+        )
+        return False
+
+    model_type = getattr(getattr(model, "config", None), "model_type", "") or "<unknown>"
+    try:
+        _apply_liger_kernel_to_instance(model=model)
+    except Exception as e:
+        # Liger raises for model types it doesn't patch. This is expected for
+        # custom / research architectures and must NOT abort training.
+        logger.warning(
+            f"Liger Kernel could not patch model_type={model_type!r} "
+            f"({type(e).__name__}: {e}). Continuing with standard HF kernels."
+        )
+        return False
+
+    logger.info(f"Liger Kernel applied (model_type={model_type}).")
+    return True
+
+
 def build_model(cfg, device: torch.device) -> Tuple[torch.nn.Module, ModelProfile]:
     """
     Load model, introspect it, optionally apply LoRA.
@@ -94,6 +140,13 @@ def build_model(cfg, device: torch.device) -> Tuple[torch.nn.Module, ModelProfil
         f"Loaded {name} | params={param_count:,} | "
         f"dtype={profile.model_dtype} | moe={profile.is_moe}"
     )
+
+    # ── Liger Kernel patching ───────────────────────────────────────
+    # Done BEFORE LoRA so PEFT wraps the already-fused modules (LoRA
+    # adapters attach to Linear children, which Liger does not touch).
+    # Done BEFORE FSDP wrap (handled later by distributed.wrap_model)
+    # so that sharding sees the final module classes.
+    _maybe_apply_liger_kernel(model, cfg)
 
     # ── LoRA ────────────────────────────────────────────────────────
     if cfg.lora.enabled:
