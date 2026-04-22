@@ -6,8 +6,8 @@
 if [[ -f "/home/apps/SPACK/spack/share/spack/setup-env.sh" ]] && [[ -n "" ]]; then
     source "/home/apps/SPACK/spack/share/spack/setup-env.sh" 2>/dev/null || true
     spack load  2>/dev/null || true
-elif command -v module &>/dev/null && [[ -n "12.4" ]]; then
-    module load cuda/12.4 2>/dev/null || true
+elif command -v module &>/dev/null && [[ -n "12.0" ]]; then
+    module load cuda/12.0 2>/dev/null || true
 fi
 
-source "/scratch/ldls-iiitd/training-framework/slurmrun/Bhaskera/.venv/bin/activate"
+source "/mnt/disk1/Framework/newchanges/Bhaskera/.venv/bin/activate"

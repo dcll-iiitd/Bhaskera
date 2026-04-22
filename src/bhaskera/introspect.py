@@ -302,7 +302,6 @@ def _detect_aux_loss(config) -> bool:
         return True
     return False
 
-
 def _detect_aux_loss_attr(config) -> str:
     """Determine how the model exposes auxiliary loss."""
     # Most HF MoE models put it in output.aux_loss when output_router_logits=True

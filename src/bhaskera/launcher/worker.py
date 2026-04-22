@@ -1,22 +1,31 @@
 """
 bhaskera.launcher.worker
 ========================
-The per-GPU training function.
-Called by Ray Train workers (via TorchTrainer) AND by raw SLURM workers.
-This is the ONLY place that wires model + data + trainer together.
+Per-GPU entry point.  Called by Ray Train's TorchTrainer for each actor
+and also directly by raw SLURM workers.
 
-The ModelProfile from introspect.py flows through here to distributed/ and trainer/.
+Changes vs v1:
+  * Round-trips the config through Config.from_dict instead of OmegaConf
+    so typed dataclass fields survive the dict shipment across the Ray
+    cluster.  (The old path silently turned dataclass typing into
+    string-keyed dicts, which made downstream comparisons brittle.)
+  * Rank-aware seeding — reproducible across runs with differentiated
+    data ordering per rank.
+  * Optional torch.use_deterministic_algorithms toggle.
 """
 from __future__ import annotations
 
 import logging
+import os
+import random
 
-import torch
+import numpy as np
 import ray.train
-from omegaconf import OmegaConf, DictConfig
+import torch
 
-from bhaskera.models import build_model
+from bhaskera.config import Config
 from bhaskera.distributed import wrap_model
+from bhaskera.models import build_model
 from bhaskera.trainer import train
 from bhaskera.utils import build_logger
 
@@ -24,23 +33,8 @@ logger = logging.getLogger(__name__)
 
 
 def worker_fn(cfg_dict: dict) -> None:
-    """
-    Entry point for a single GPU worker.
-    Ray Train calls this inside each actor.
-
-    cfg_dict: plain dict (JSON-serialisable) so Ray can ship it across the cluster.
-    """
-    # Convert to OmegaConf DictConfig for attribute access
-    if isinstance(cfg_dict, DictConfig):
-        cfg = cfg_dict
-    elif isinstance(cfg_dict, dict):
-        cfg = OmegaConf.create(cfg_dict)
-    else:
-        from dataclasses import asdict, is_dataclass
-        if is_dataclass(cfg_dict):
-            cfg = OmegaConf.create(asdict(cfg_dict))
-        else:
-            cfg = OmegaConf.create(dict(cfg_dict))
+    """Entry point for a single GPU worker."""
+    cfg = Config.from_dict(cfg_dict)
 
     ray_ctx    = ray.train.get_context()
     local_rank = ray_ctx.get_local_rank()
@@ -50,17 +44,17 @@ def worker_fn(cfg_dict: dict) -> None:
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
 
+    _seed_everything(cfg.training.seed, rank, cfg.training.deterministic)
+
     logger.info(f"[rank {rank}/{world_size}] GPU {local_rank} ready")
 
-    # Data — Ray Dataset shard is injected by TorchTrainer
     dataset = ray.train.get_dataset_shard("train")
 
-    # Model — load on CPU for FSDP2 (shards to GPU during wrap), GPU for DDP
-    strategy = cfg.training.distributed.strategy.lower()
+    # For FSDP2, load on CPU so the wrap step can shard onto GPUs.
+    # For DDP, load directly on the target GPU.
+    strategy    = cfg.training.distributed.strategy.lower()
     load_device = torch.device("cpu") if strategy == "fsdp" else device
 
-    # build_model now returns (model, profile) — profile contains all
-    # auto-detected info (MoE topology, layer classes, dtype, etc.)
     model, profile = build_model(cfg, load_device)
 
     if rank == 0:
@@ -72,13 +66,10 @@ def worker_fn(cfg_dict: dict) -> None:
             f"has_aux_loss={profile.has_aux_loss}"
         )
 
-    # Distributed wrap (FSDP2 or DDP) — uses profile for auto layer detection
     model = wrap_model(model, cfg, local_rank, profile)
 
-    # Logger (rank 0 only to avoid duplicate logging)
     tracker = build_logger(cfg) if rank == 0 else None
 
-    # Train — profile tells the loop about MoE aux loss, autocast dtype, etc.
     train(
         model=model,
         dataset=dataset,
@@ -88,3 +79,27 @@ def worker_fn(cfg_dict: dict) -> None:
         local_rank=local_rank,
         tracker=tracker,
     )
+
+
+# ---------------------------------------------------------------------------
+# Seeding
+# ---------------------------------------------------------------------------
+
+def _seed_everything(base_seed: int, rank: int, deterministic: bool) -> None:
+    """
+    Seed PyTorch, NumPy and Python RNGs with a rank-offset seed so each
+    rank shuffles its data differently but every run is reproducible.
+    """
+    seed = int(base_seed) + int(rank)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+
+    if deterministic:
+        # Slower but bit-exact across runs.
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        try:
+            torch.use_deterministic_algorithms(True, warn_only=True)
+        except Exception as e:  # pragma: no cover
+            logger.warning(f"Could not enable deterministic mode: {e}")
