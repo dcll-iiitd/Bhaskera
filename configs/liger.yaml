@@ -1,0 +1,86 @@
+# =============================================================================
+# Bhaskera — Falcon-7B SFT on UltraChat, 3 GPUs
+#             W&B logging | Flash Attention 2 | Liger Kernels
+#
+# Memory plan (bfloat16 + LoRA + FSDP2 FULL_SHARD across 3 GPUs):
+#   Falcon-7B params  ≈ 14 GB total → ~4.7 GB/GPU after sharding
+#   LoRA trainable    ≈ 20-40 MB (r=16 on query_key_value)
+#   Activations       : ~8-14 GB/GPU at seq_len=2048, batch=4 with AC on
+#   Flash Attn 2      : ~30-40% lower activation memory vs eager
+#   Liger Kernels     : fused RMSNorm/RoPE/CrossEntropy — saves ~15% memory
+#   AdamW state       : tiny (only trainable LoRA params)
+#   Works on 3x 24 GB (RTX 3090/4090, L4) and up.
+#
+# Effective batch = 3 GPUs × batch_size 4 × grad_accum 4 = 48 sequences / step
+#
+# Prerequisites:
+#   pip install flash-attn --no-build-isolation   # Flash Attention 2
+#   pip install liger-kernel>=0.5                 # Liger fused kernels (auto-applied)
+#   pip install wandb                             # W&B logging
+# =============================================================================
+
+model:
+  name: "tiiuae/falcon-7b"
+  dtype: "bfloat16"
+  attn_impl: "flash_attention_2"   # Flash Attention 2 — ~30-40% faster attention,
+                                   # lower peak activation memory. Requires
+                                   # flash-attn>=2.5 built against your torch wheel.
+                                   # Install: MAX_JOBS=4 pip install flash-attn --no-build-isolation
+  use_liger_kernel: true           # Apply Liger fused kernels (RMSNorm, RoPE,
+                                   # SwiGLU, CrossEntropy) via
+                                   # _apply_liger_kernel_to_instance at load time.
+                                   # ~15% activation memory savings + faster fwd pass.
+                                   # Gracefully no-ops if liger-kernel is not installed.
+  trust_remote_code: false         # Falcon-7B uses stock transformers FalconForCausalLM
+
+data:
+  name: "ultrachat"                # HuggingFaceH4/ultrachat_200k, text_col=prompt
+  seq_len: 2048
+  num_workers: 8                   # Ray Data tokenisation parallelism
+
+lora:
+  enabled: true
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["auto"]         # introspect.py auto-discovers query_key_value
+                                   # (Falcon's fused QKV projection)
+  include_experts: false           # Falcon is dense, not MoE
+  freeze_router: true              # ignored for dense models, safe to leave on
+  modules_to_save: []              # set ["embed_tokens","lm_head"] to fully train them
+
+training:
+  batch_size: 4                    # per-GPU micro-batch
+  grad_accum: 4                    # effective batch = 3 × 4 × 4 = 48 sequences/step
+  lr: 2.0e-4                       # standard LoRA LR for 7B models
+  weight_decay: 0.01
+  max_steps: 2000                  # ~half of one UltraChat epoch at effective batch 48
+  num_epochs: 1
+  warmup_steps: 100
+  max_grad_norm: 1.0
+  seed: 42
+  deterministic: false             # set true for bit-exact reruns (slower)
+
+  distributed:
+    strategy: "fsdp"
+    fsdp:
+      sharding_strategy: "FULL_SHARD"   # best memory efficiency across 3 GPUs
+      transformer_layer_cls: []         # empty → auto-detect FalconDecoderLayer
+      param_dtype: "bfloat16"
+      reduce_dtype: "bfloat16"          # bfloat16 fine for dense models
+      buffer_dtype: "bfloat16"
+      activation_checkpointing: true    # ~30% memory savings, ~20% time cost
+      cpu_offload: false                # enable only if OOM
+      shard_experts_individually: false # dense model — no experts to shard
+
+checkpoint:
+  enabled: true
+  save_dir: "./checkpoints/falcon7b-ultrachat-flash-liger"
+  save_interval: 1                 # every N epochs
+  keep_last_n: 2                   # prune all but the 2 best-by-loss checkpoints
+
+logging:
+  tracker: "wandb"                 # W&B experiment tracking
+  project: "bhaskera"
+  run_name: "falcon7b-ultrachat-lora-3gpu-flash-liger"
+  log_gpu_every_n_steps: 10        # pynvml GPU telemetry pushed to W&B every 10 steps
