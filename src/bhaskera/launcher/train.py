@@ -6,8 +6,19 @@ Unified CLI + Ray Train driver.
 Local (1–N GPUs):
     python -m bhaskera.launcher.train --config configs/config.yaml
 
-SLURM (called by slurm/submit.sh after Ray cluster is bootstrapped):
+SLURM (called by scripts/submit.sh after Ray cluster is bootstrapped):
     python -m bhaskera.launcher.train --config configs/config.yaml --num-workers 8
+
+Changes vs v2:
+    * Wires the monitoring stack (Ray Dashboard + Prometheus +
+      Grafana + custom metric agent) before ``ray.init`` so the
+      cluster comes up with the right env vars and the right
+      dashboard kwargs.
+    * Prints the dashboard URL after init in a banner block.
+    * Disables the dashboard explicitly only when
+      ``cfg.monitoring.dashboard: false`` — previously it was
+      hard-disabled on the local path, which made the user-requested
+      "default to Ray Dashboard" behaviour impossible.
 """
 from __future__ import annotations
 import argparse
@@ -22,6 +33,7 @@ from ray.train.torch import TorchTrainer
 
 from bhaskera.config import load_config
 from bhaskera.data import build_ray_dataset
+from bhaskera.launcher.monitoring import setup_monitoring
 from bhaskera.launcher.worker import worker_fn
 
 logging.basicConfig(
@@ -35,7 +47,19 @@ def main() -> None:
     args = _parse_args()
     cfg  = load_config(args.config)
 
-    _init_ray()
+    # CLI overrides for monitoring (handy when poking around)
+    if args.no_dashboard:
+        cfg.monitoring.dashboard = False
+    if args.dashboard_port:
+        cfg.monitoring.dashboard_port = args.dashboard_port
+
+    monitoring = setup_monitoring(cfg)
+
+    _init_ray(monitoring)
+
+    # Print the banner *after* init so we know the cluster is up and
+    # the dashboard is listening.
+    logger.info(monitoring.banner())
 
     # Dataset — built once on the driver, Ray distributes shards to workers
     ray_dataset = build_ray_dataset(cfg)
@@ -68,33 +92,36 @@ def main() -> None:
 # Ray init
 # ---------------------------------------------------------------------------
 
-def _init_ray() -> None:
+def _init_ray(monitoring) -> None:
     if ray.is_initialized():
         return
 
-    slurm_address = os.environ.get("RAY_ADDRESS")  # set by slurm/submit.sh
+    slurm_address = os.environ.get("RAY_ADDRESS")  # set by scripts/submit.sh
 
     if slurm_address:
-        # SLURM: submit.sh already started the cluster and exported RAY_ADDRESS
+        # SLURM: submit.sh already started the cluster and exported
+        # RAY_ADDRESS.  Dashboard kwargs only apply on cluster *start*,
+        # not on driver attach — so we just connect.
         logger.info(f"Connecting to Ray cluster at {slurm_address}")
         ray.init(address=slurm_address)
     else:
-        # Local: kill any stale Ray session from a previous job on this node,
-        # then start a clean single-node cluster using all local GPUs.
+        # Local: kill any stale Ray session on this node, then start
+        # a fresh single-node cluster with the dashboard enabled.
         logger.info("Stopping any stale Ray session...")
         subprocess.run(["ray", "stop", "--force"], capture_output=True)
 
-        # Strip any leftover Ray env vars the shell may have inherited
         for var in ("RAY_ADDRESS", "RAY_HEAD_SERVICE_HOST", "RAY_HEAD_SERVICE_PORT"):
             os.environ.pop(var, None)
 
         n_gpus = _count_gpus()
         logger.info(f"Starting local Ray cluster ({n_gpus} GPU(s))")
-        ray.init(
-            num_cpus=os.cpu_count(),
-            num_gpus=n_gpus,
-            include_dashboard=False,   # skip dashboard in interactive sessions
-        )
+
+        init_kwargs = {
+            "num_cpus": os.cpu_count(),
+            "num_gpus": n_gpus,
+        }
+        init_kwargs.update(monitoring.ray_init_kwargs())
+        ray.init(**init_kwargs)
 
     logger.info(f"Ray resources: {ray.available_resources()}")
 
@@ -105,10 +132,12 @@ def _init_ray() -> None:
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Bhaskera training launcher")
-    p.add_argument("--config",        required=True,          help="Path to YAML config")
-    p.add_argument("--num-workers",   type=int, default=None, help="Number of GPU workers (default: all visible GPUs)")
-    p.add_argument("--max-failures",  type=int, default=2,    help="Ray fault tolerance — worker restart limit")
-    p.add_argument("--storage-path",  type=str, default=None, help="Ray Train storage path (overrides config)")
+    p.add_argument("--config",         required=True,          help="Path to YAML config")
+    p.add_argument("--num-workers",    type=int, default=None, help="Number of GPU workers (default: all visible GPUs)")
+    p.add_argument("--max-failures",   type=int, default=2,    help="Ray fault tolerance — worker restart limit")
+    p.add_argument("--storage-path",   type=str, default=None, help="Ray Train storage path (overrides config)")
+    p.add_argument("--no-dashboard",   action="store_true",     help="Disable Ray Dashboard for this run (overrides config)")
+    p.add_argument("--dashboard-port", type=int, default=None,  help="Ray Dashboard port (overrides config)")
     return p.parse_args()
 
 

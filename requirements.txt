@@ -13,17 +13,29 @@ pandas>=2.0
 peft>=0.10
 psutil>=5.9
 pyyaml>=6.0
-ray[train,data]>=2.10
+
+# Ray Train + Data + Default (the 'default' extra pulls in the
+# dashboard, the metrics agent, and prometheus_client — required for
+# the Ray Dashboard / Prometheus / Grafana integration).
+ray[train,data,default]>=2.10
+
 safetensors>=0.4
 tensorboardx>=2.6
 torch>=2.4
 tqdm>=4.60
 transformers>=4.45,<5.0.0
 omegaconf>=2.3.0
+
+# NVML bindings for cheap, sub-millisecond GPU telemetry.
+# pynvml is the legacy package; nvidia-ml-py is the official one.
+# Either works at runtime; we prefer nvidia-ml-py and fall back.
+nvidia-ml-py>=12.535
+
 # Triton-fused RMSNorm/RoPE/SwiGLU/CrossEntropy kernels — patches HF
 # modules in-place at load time. Safe no-op on unsupported architectures.
 liger-kernel>=0.5
-# optional
+
+# Optional experiment trackers — Bhaskera works without these.
 wandb>=0.16
 mlflow>=2.10
 

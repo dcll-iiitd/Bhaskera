@@ -1,17 +1,27 @@
 """
 Bhaskera config — single source of truth.
 
-Changes vs v1:
-  * Added TrainingConfig.seed for deterministic runs.
-  * Added Config.from_dict classmethod so workers can round-trip through
-    JSON-serialisable dicts without losing dataclass types (the previous
-    OmegaConf conversion in worker.py silently turned typed fields into
-    strings, which broke downstream comparisons).
+Changes vs v2:
+  * ``logging.tracker`` may now be a list:
+        tracker: ["wandb", "ray"]    # both
+        tracker: "wandb"              # legacy single-string still OK
+        tracker: null                  # → Ray Dashboard only (default)
+  * ``logging.tags`` and ``logging.group`` for cohort filtering in
+    W&B / MLflow.
+  * NEW ``monitoring`` block — Ray Dashboard, Prometheus, Grafana,
+    and per-step custom-metric toggles.  See ``MonitoringConfig``.
+  * MFU / throughput config: ``monitoring.peak_tflops_per_gpu`` plus
+    ``monitoring.metrics_every_n_steps``.
+
+The ``tracker`` field type is widened to ``Optional[Any]`` because
+YAML can deliver either a string, a list, or null and we want to
+defer validation to the loggers package (where the error message is
+informative).
 """
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import yaml
 
@@ -26,11 +36,6 @@ class ModelConfig:
     dtype: str = "bfloat16"
     attn_impl: Optional[str] = None
     trust_remote_code: bool = False
-    # Apply Liger Kernel's Triton-fused RMSNorm/RoPE/SwiGLU/CrossEntropy
-    # kernels to the loaded model. Default ON — the patch is a no-op for
-    # architectures Liger does not recognise, and a no-op at runtime if
-    # the `liger-kernel` package is not importable. Set false to force
-    # the vanilla HuggingFace implementation.
     use_liger_kernel: bool = True
 
 
@@ -129,8 +134,8 @@ class TrainingConfig:
     num_epochs: int = 1
     warmup_steps: int = 100
     max_grad_norm: float = 1.0
-    seed: int = 42                 # NEW — rank offset applied inside worker
-    deterministic: bool = False    # NEW — enables torch.use_deterministic_algorithms
+    seed: int = 42
+    deterministic: bool = False
     distributed: DistributedConfig = field(default_factory=DistributedConfig)
 
 
@@ -144,11 +149,75 @@ class CheckpointConfig:
 
 @dataclass
 class LoggingConfig:
-    tracker: Optional[str] = None
+    # str | list[str] | None — see _normalize_trackers in loggers/__init__
+    tracker: Optional[Union[str, list]] = None
     project: str = "bhaskera"
     run_name: str = "run"
     mlflow_tracking_uri: Optional[str] = None
     log_gpu_every_n_steps: int = 10
+    tags: list[str] = field(default_factory=list)
+    group: Optional[str] = None
+
+
+# ── NEW: monitoring sub-configs ─────────────────────────────────────
+
+@dataclass
+class PrometheusConfig:
+    """How Ray should reach a Prometheus server (for embedded panels)."""
+    enabled: bool = False
+    host: str = "http://localhost:9090"      # → RAY_PROMETHEUS_HOST
+    name: str = "Prometheus"                 # → RAY_PROMETHEUS_NAME
+    # Authentication headers (rare, but supported by Ray).  The dict
+    # is JSON-encoded into RAY_PROMETHEUS_HEADERS.
+    headers: dict = field(default_factory=dict)
+
+
+@dataclass
+class GrafanaConfig:
+    """How Ray should embed Grafana panels into the dashboard."""
+    enabled: bool = False
+    host: str = "http://localhost:3000"      # → RAY_GRAFANA_HOST
+    # Optional public-facing URL the user's browser uses for the
+    # iframe (cluster-internal vs external addresses often differ).
+    iframe_host: Optional[str] = None        # → RAY_GRAFANA_IFRAME_HOST
+    org_id: str = "1"                        # → RAY_GRAFANA_ORG_ID
+
+
+@dataclass
+class MetricsConfig:
+    """Per-step custom-metric toggles."""
+    enabled: bool = True
+    # How often (in optimizer steps) to push system stats from every rank.
+    system_every_n_steps: int = 10
+    # How often (in optimizer steps) to push CUDA-allocator stats.
+    cuda_every_n_steps: int = 10
+    # Sub-collectors
+    gpu: bool = True
+    cpu: bool = True
+    cuda_memory: bool = True
+    throughput: bool = True
+    # Throughput / MFU
+    peak_tflops_per_gpu: float = 312.0       # A100 bf16; override per cluster.
+    throughput_window: int = 50              # steps to average for tokens/sec EMA
+    throughput_warmup: int = 5               # drop these many steps from EMA
+
+
+@dataclass
+class MonitoringConfig:
+    """
+    Ray Dashboard / Prometheus / Grafana / per-step metrics.
+
+    Default-constructed values give you a working Ray Dashboard with
+    no external services — exactly the "tracker is none → Ray
+    Dashboard by default" behaviour the user asked for.
+    """
+    dashboard: bool                = True
+    dashboard_host: str            = "0.0.0.0"
+    dashboard_port: int            = 8265
+    metrics_export_port: int       = 8080
+    prometheus: PrometheusConfig   = field(default_factory=PrometheusConfig)
+    grafana: GrafanaConfig         = field(default_factory=GrafanaConfig)
+    metrics: MetricsConfig         = field(default_factory=MetricsConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -157,21 +226,21 @@ class LoggingConfig:
 
 @dataclass
 class Config:
-    model: ModelConfig = field(default_factory=ModelConfig)
-    data: DataConfig = field(default_factory=DataConfig)
-    lora: LoraConfig = field(default_factory=LoraConfig)
-    moe: MoEConfig = field(default_factory=MoEConfig)
-    training: TrainingConfig = field(default_factory=TrainingConfig)
-    checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
-    logging: LoggingConfig = field(default_factory=LoggingConfig)
-    inference: InferenceConfig = field(default_factory=InferenceConfig)
+    model: ModelConfig            = field(default_factory=ModelConfig)
+    data: DataConfig              = field(default_factory=DataConfig)
+    lora: LoraConfig              = field(default_factory=LoraConfig)
+    moe: MoEConfig                = field(default_factory=MoEConfig)
+    training: TrainingConfig      = field(default_factory=TrainingConfig)
+    checkpoint: CheckpointConfig  = field(default_factory=CheckpointConfig)
+    logging: LoggingConfig        = field(default_factory=LoggingConfig)
+    inference: InferenceConfig    = field(default_factory=InferenceConfig)
+    monitoring: MonitoringConfig  = field(default_factory=MonitoringConfig)
 
     def as_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Config":
-        """Rebuild a typed Config from a plain dict (JSON-serialisable)."""
         return _dict_to_config(d or {})
 
 
@@ -203,6 +272,11 @@ def _dict_to_config(raw: dict) -> Config:
     infer_raw   = _get(raw, "inference", default={}) or {}
     tq_raw      = _get(raw, "inference", "turboquant", default={}) or {}
     spec_raw    = _get(raw, "inference", "speculative", default={}) or {}
+
+    mon_raw     = _get(raw, "monitoring", default={}) or {}
+    prom_raw    = _get(raw, "monitoring", "prometheus", default={}) or {}
+    graf_raw    = _get(raw, "monitoring", "grafana",    default={}) or {}
+    metrics_raw = _get(raw, "monitoring", "metrics",    default={}) or {}
 
     return Config(
         model=ModelConfig(
@@ -278,6 +352,8 @@ def _dict_to_config(raw: dict) -> Config:
             run_name=str(log_raw.get("run_name", "run")),
             mlflow_tracking_uri=log_raw.get("mlflow_tracking_uri"),
             log_gpu_every_n_steps=int(log_raw.get("log_gpu_every_n_steps", 10)),
+            tags=list(log_raw.get("tags", []) or []),
+            group=log_raw.get("group"),
         ),
         inference=InferenceConfig(
             max_new_tokens=int(infer_raw.get("max_new_tokens", 512)),
@@ -300,6 +376,36 @@ def _dict_to_config(raw: dict) -> Config:
                 enabled=bool(spec_raw.get("enabled", False)),
                 draft_model_name=str(spec_raw.get("draft_model_name", "")),
                 num_draft_tokens=int(spec_raw.get("num_draft_tokens", 5)),
+            ),
+        ),
+        monitoring=MonitoringConfig(
+            dashboard=bool(mon_raw.get("dashboard", True)),
+            dashboard_host=str(mon_raw.get("dashboard_host", "0.0.0.0")),
+            dashboard_port=int(mon_raw.get("dashboard_port", 8265)),
+            metrics_export_port=int(mon_raw.get("metrics_export_port", 8080)),
+            prometheus=PrometheusConfig(
+                enabled=bool(prom_raw.get("enabled", False)),
+                host=str(prom_raw.get("host", "http://localhost:9090")),
+                name=str(prom_raw.get("name", "Prometheus")),
+                headers=dict(prom_raw.get("headers", {}) or {}),
+            ),
+            grafana=GrafanaConfig(
+                enabled=bool(graf_raw.get("enabled", False)),
+                host=str(graf_raw.get("host", "http://localhost:3000")),
+                iframe_host=graf_raw.get("iframe_host"),
+                org_id=str(graf_raw.get("org_id", "1") or "1"),
+            ),
+            metrics=MetricsConfig(
+                enabled=bool(metrics_raw.get("enabled", True)),
+                system_every_n_steps=int(metrics_raw.get("system_every_n_steps", 10)),
+                cuda_every_n_steps=int(metrics_raw.get("cuda_every_n_steps", 10)),
+                gpu=bool(metrics_raw.get("gpu", True)),
+                cpu=bool(metrics_raw.get("cpu", True)),
+                cuda_memory=bool(metrics_raw.get("cuda_memory", True)),
+                throughput=bool(metrics_raw.get("throughput", True)),
+                peak_tflops_per_gpu=float(metrics_raw.get("peak_tflops_per_gpu", 312.0)),
+                throughput_window=int(metrics_raw.get("throughput_window", 50)),
+                throughput_warmup=int(metrics_raw.get("throughput_warmup", 5)),
             ),
         ),
     )

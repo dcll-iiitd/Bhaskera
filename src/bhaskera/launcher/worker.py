@@ -1,17 +1,16 @@
 """
 bhaskera.launcher.worker
 ========================
-Per-GPU entry point.  Called by Ray Train's TorchTrainer for each actor
-and also directly by raw SLURM workers.
+Per-GPU entry point.  Called by Ray Train's TorchTrainer for each
+actor and also directly by raw SLURM workers.
 
-Changes vs v1:
-  * Round-trips the config through Config.from_dict instead of OmegaConf
-    so typed dataclass fields survive the dict shipment across the Ray
-    cluster.  (The old path silently turned dataclass typing into
-    string-keyed dicts, which made downstream comparisons brittle.)
-  * Rank-aware seeding — reproducible across runs with differentiated
-    data ordering per rank.
-  * Optional torch.use_deterministic_algorithms toggle.
+Changes vs v2:
+    * **Every rank now gets a logger**, not just rank 0.  Rank-0
+      logger fans out to W&B / MLflow as before; non-rank-0 loggers
+      contain only the Ray Prometheus child so per-GPU stats from
+      every worker land on the dashboard with a ``rank`` tag.
+    * Passes ``rank`` and ``world_size`` into ``build_logger`` so the
+      backends can tag samples appropriately.
 """
 from __future__ import annotations
 
@@ -50,8 +49,6 @@ def worker_fn(cfg_dict: dict) -> None:
 
     dataset = ray.train.get_dataset_shard("train")
 
-    # For FSDP2, load on CPU so the wrap step can shard onto GPUs.
-    # For DDP, load directly on the target GPU.
     strategy    = cfg.training.distributed.strategy.lower()
     load_device = torch.device("cpu") if strategy == "fsdp" else device
 
@@ -68,7 +65,9 @@ def worker_fn(cfg_dict: dict) -> None:
 
     model = wrap_model(model, cfg, local_rank, profile)
 
-    tracker = build_logger(cfg) if rank == 0 else None
+    # Every rank builds a logger.  build_logger() decides internally
+    # which backends to enable for non-rank-0 (Ray-only).
+    tracker = build_logger(cfg, rank=rank, world_size=world_size)
 
     train(
         model=model,
@@ -78,6 +77,7 @@ def worker_fn(cfg_dict: dict) -> None:
         rank=rank,
         local_rank=local_rank,
         tracker=tracker,
+        world_size=world_size,
     )
 
 
@@ -97,7 +97,6 @@ def _seed_everything(base_seed: int, rank: int, deterministic: bool) -> None:
     np.random.seed(seed)
 
     if deterministic:
-        # Slower but bit-exact across runs.
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         try:
             torch.use_deterministic_algorithms(True, warn_only=True)
