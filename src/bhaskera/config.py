@@ -13,6 +13,11 @@ Changes vs v2:
   * MFU / throughput config: ``monitoring.peak_tflops_per_gpu`` plus
     ``monitoring.metrics_every_n_steps``.
 
+Phase 1 changes:
+  * DataConfig extended with tokenized_path, cache_dir, overwrite_cache,
+    tokenize_batch_size, tokenize_compression, prefetch_batches,
+    local_shuffle_buffer_multiplier, pack_sequences.
+
 The ``tracker`` field type is widened to ``Optional[Any]`` because
 YAML can deliver either a string, a list, or null and we want to
 defer validation to the loggers package (where the error message is
@@ -96,6 +101,18 @@ class DataConfig:
     name: str = "ultrachat"
     seq_len: int = 2048
     num_workers: int = 4
+    # ── Phase 1 additions ────────────────────────────────────────────────────
+    # fix #17 — CLI wiring for pre-tokenized datasets
+    tokenized_path: Optional[str] = None
+    cache_dir: Optional[str] = None
+    overwrite_cache: bool = False
+    # fix #27 — was hard-coded 256; OOMs at seq_len > 2048
+    tokenize_batch_size: int = 128
+    # fix #16 — compression and prefetch
+    tokenize_compression: str = "snappy"   # snappy | zstd | none
+    prefetch_batches: int = 2
+    local_shuffle_buffer_multiplier: int = 10
+    pack_sequences: bool = False
 
 
 @dataclass
@@ -136,6 +153,8 @@ class TrainingConfig:
     max_grad_norm: float = 1.0
     seed: int = 42
     deterministic: bool = False
+    grad_clip: Optional[float] = 1.0          # Phase 1: used by no_sync loop
+    max_grad_skip_steps: int = 100
     distributed: DistributedConfig = field(default_factory=DistributedConfig)
 
 
@@ -159,16 +178,14 @@ class LoggingConfig:
     group: Optional[str] = None
 
 
-# ── NEW: monitoring sub-configs ─────────────────────────────────────
+# ── Monitoring sub-configs ────────────────────────────────────────────────
 
 @dataclass
 class PrometheusConfig:
     """How Ray should reach a Prometheus server (for embedded panels)."""
     enabled: bool = False
-    host: str = "http://localhost:9090"      # → RAY_PROMETHEUS_HOST
-    name: str = "Prometheus"                 # → RAY_PROMETHEUS_NAME
-    # Authentication headers (rare, but supported by Ray).  The dict
-    # is JSON-encoded into RAY_PROMETHEUS_HEADERS.
+    host: str = "http://localhost:9090"
+    name: str = "Prometheus"
     headers: dict = field(default_factory=dict)
 
 
@@ -176,40 +193,30 @@ class PrometheusConfig:
 class GrafanaConfig:
     """How Ray should embed Grafana panels into the dashboard."""
     enabled: bool = False
-    host: str = "http://localhost:3000"      # → RAY_GRAFANA_HOST
-    # Optional public-facing URL the user's browser uses for the
-    # iframe (cluster-internal vs external addresses often differ).
-    iframe_host: Optional[str] = None        # → RAY_GRAFANA_IFRAME_HOST
-    org_id: str = "1"                        # → RAY_GRAFANA_ORG_ID
+    host: str = "http://localhost:3000"
+    iframe_host: Optional[str] = None
+    org_id: str = "1"
 
 
 @dataclass
 class MetricsConfig:
     """Per-step custom-metric toggles."""
     enabled: bool = True
-    # How often (in optimizer steps) to push system stats from every rank.
     system_every_n_steps: int = 10
-    # How often (in optimizer steps) to push CUDA-allocator stats.
     cuda_every_n_steps: int = 10
-    # Sub-collectors
     gpu: bool = True
     cpu: bool = True
     cuda_memory: bool = True
     throughput: bool = True
-    # Throughput / MFU
-    peak_tflops_per_gpu: float = 312.0       # A100 bf16; override per cluster.
-    throughput_window: int = 50              # steps to average for tokens/sec EMA
-    throughput_warmup: int = 5               # drop these many steps from EMA
+    peak_tflops_per_gpu: float = 312.0
+    throughput_window: int = 50
+    throughput_warmup: int = 5
 
 
 @dataclass
 class MonitoringConfig:
     """
     Ray Dashboard / Prometheus / Grafana / per-step metrics.
-
-    Default-constructed values give you a working Ray Dashboard with
-    no external services — exactly the "tracker is none → Ray
-    Dashboard by default" behaviour the user asked for.
     """
     dashboard: bool                = True
     dashboard_host: str            = "0.0.0.0"
@@ -290,6 +297,17 @@ def _dict_to_config(raw: dict) -> Config:
             name=data_raw.get("name", "ultrachat"),
             seq_len=int(data_raw.get("seq_len", 2048)),
             num_workers=int(data_raw.get("num_workers", 4)),
+            # Phase 1 additions
+            tokenized_path=data_raw.get("tokenized_path"),
+            cache_dir=data_raw.get("cache_dir"),
+            overwrite_cache=bool(data_raw.get("overwrite_cache", False)),
+            tokenize_batch_size=int(data_raw.get("tokenize_batch_size", 128)),
+            tokenize_compression=str(data_raw.get("tokenize_compression", "snappy")),
+            prefetch_batches=int(data_raw.get("prefetch_batches", 2)),
+            local_shuffle_buffer_multiplier=int(
+                data_raw.get("local_shuffle_buffer_multiplier", 10)
+            ),
+            pack_sequences=bool(data_raw.get("pack_sequences", False)),
         ),
         lora=LoraConfig(
             enabled=bool(lora_raw.get("enabled", False)),
@@ -319,6 +337,8 @@ def _dict_to_config(raw: dict) -> Config:
             max_grad_norm=float(train_raw.get("max_grad_norm", 1.0)),
             seed=int(train_raw.get("seed", 42)),
             deterministic=bool(train_raw.get("deterministic", False)),
+            grad_clip=train_raw.get("grad_clip", 1.0),
+            max_grad_skip_steps=int(train_raw.get("max_grad_skip_steps", 100)),
             distributed=DistributedConfig(
                 strategy=str(dist_raw.get("strategy", "fsdp")),
                 fsdp=FSDPConfig(

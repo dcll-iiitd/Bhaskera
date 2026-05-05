@@ -9,16 +9,12 @@ Local (1–N GPUs):
 SLURM (called by scripts/submit.sh after Ray cluster is bootstrapped):
     python -m bhaskera.launcher.train --config configs/config.yaml --num-workers 8
 
-Changes vs v2:
-    * Wires the monitoring stack (Ray Dashboard + Prometheus +
-      Grafana + custom metric agent) before ``ray.init`` so the
-      cluster comes up with the right env vars and the right
-      dashboard kwargs.
-    * Prints the dashboard URL after init in a banner block.
-    * Disables the dashboard explicitly only when
-      ``cfg.monitoring.dashboard: false`` — previously it was
-      hard-disabled on the local path, which made the user-requested
-      "default to Ray Dashboard" behaviour impossible.
+Phase 1 fixes:
+  fix #26 — _count_gpus() now reads SLURM_NNODES × SLURM_GPUS_PER_NODE
+             when both env vars are set, instead of returning only the
+             head-node GPU count (which is always 1 on SLURM login nodes).
+  fix #10 — world_size is passed to build_ray_dataset() so partitioning
+             is world-size-aware.
 """
 from __future__ import annotations
 import argparse
@@ -47,7 +43,6 @@ def main() -> None:
     args = _parse_args()
     cfg  = load_config(args.config)
 
-    # CLI overrides for monitoring (handy when poking around)
     if args.no_dashboard:
         cfg.monitoring.dashboard = False
     if args.dashboard_port:
@@ -57,15 +52,15 @@ def main() -> None:
 
     _init_ray(monitoring)
 
-    # Print the banner *after* init so we know the cluster is up and
-    # the dashboard is listening.
     logger.info(monitoring.banner())
 
-    # Dataset — built once on the driver, Ray distributes shards to workers
-    ray_dataset = build_ray_dataset(cfg)
-
+    # fix #26: resolve world_size before building the dataset so
+    # partitioning reflects the actual cluster size (not just head-node GPUs)
     num_workers = args.num_workers or _count_gpus()
     logger.info(f"Launching with {num_workers} GPU worker(s)")
+
+    # fix #10: pass world_size so build_ray_dataset can partition correctly
+    ray_dataset = build_ray_dataset(cfg, world_size=num_workers)
 
     trainer = TorchTrainer(
         train_loop_per_worker=worker_fn,
@@ -96,17 +91,12 @@ def _init_ray(monitoring) -> None:
     if ray.is_initialized():
         return
 
-    slurm_address = os.environ.get("RAY_ADDRESS")  # set by scripts/submit.sh
+    slurm_address = os.environ.get("RAY_ADDRESS")
 
     if slurm_address:
-        # SLURM: submit.sh already started the cluster and exported
-        # RAY_ADDRESS.  Dashboard kwargs only apply on cluster *start*,
-        # not on driver attach — so we just connect.
         logger.info(f"Connecting to Ray cluster at {slurm_address}")
         ray.init(address=slurm_address)
     else:
-        # Local: kill any stale Ray session on this node, then start
-        # a fresh single-node cluster with the dashboard enabled.
         logger.info("Stopping any stale Ray session...")
         subprocess.run(["ray", "stop", "--force"], capture_output=True)
 
@@ -136,16 +126,41 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--num-workers",    type=int, default=None, help="Number of GPU workers (default: all visible GPUs)")
     p.add_argument("--max-failures",   type=int, default=2,    help="Ray fault tolerance — worker restart limit")
     p.add_argument("--storage-path",   type=str, default=None, help="Ray Train storage path (overrides config)")
-    p.add_argument("--no-dashboard",   action="store_true",     help="Disable Ray Dashboard for this run (overrides config)")
-    p.add_argument("--dashboard-port", type=int, default=None,  help="Ray Dashboard port (overrides config)")
+    p.add_argument("--no-dashboard",   action="store_true",    help="Disable Ray Dashboard for this run (overrides config)")
+    p.add_argument("--dashboard-port", type=int, default=None, help="Ray Dashboard port (overrides config)")
     return p.parse_args()
 
 
 def _count_gpus() -> int:
+    """
+    fix #26: returns the true total GPU count across the SLURM job.
+
+    On SLURM, torch.cuda.device_count() only sees GPUs on the head node
+    (typically 0 or 1 on login nodes). The correct count comes from
+    SLURM_NNODES × SLURM_GPUS_PER_NODE when both are set.
+
+    Priority:
+      1. SLURM_NNODES × SLURM_GPUS_PER_NODE (multi-node SLURM job)
+      2. torch.cuda.device_count()            (local / single-node)
+    """
     import torch
+
+    slurm_nodes = int(os.environ.get("SLURM_NNODES", 0))
+    slurm_gpus  = int(os.environ.get("SLURM_GPUS_PER_NODE", 0))
+
+    if slurm_nodes > 0 and slurm_gpus > 0:
+        total = slurm_nodes * slurm_gpus
+        logger.info(
+            f"SLURM GPU count: {slurm_nodes} nodes × {slurm_gpus} GPUs/node = {total} total"
+        )
+        return total
+
     n = torch.cuda.device_count()
     if n == 0:
-        raise RuntimeError("No GPUs found. Check your CUDA installation.")
+        raise RuntimeError(
+            "No GPUs found. Check your CUDA installation. "
+            "If running on SLURM, ensure SLURM_NNODES and SLURM_GPUS_PER_NODE are set."
+        )
     return n
 
 

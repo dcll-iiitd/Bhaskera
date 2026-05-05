@@ -3,37 +3,20 @@ bhaskera.trainer.loop
 =====================
 Pure training loop.
 
-Compared to v2, this revision adds production-grade observability:
+Phase 1 fixes:
+  loop (critical) — model.no_sync() is now used on all but the last micro-step
+                    of gradient accumulation.  Without this, FSDP2 fires a full
+                    all-reduce on EVERY micro-step, multiplying NCCL communication
+                    cost by grad_accum.  This fix reduces per-step NCCL traffic
+                    by (grad_accum - 1) / grad_accum.
+  fix #16         — iter_torch_batches uses prefetch_batches from config.
+  loop            — drop_last=True prevents shape mismatches in the last batch.
+  loop            — explicit dtypes in iter_torch_batches (int64 for embedding lookup).
 
-    * Throughput / MFU
-        Step time, tokens/sec (global and per-GPU), samples/sec, and
-        a Chinchilla-style MFU estimate.  The tracker is per-rank so
-        every GPU's contribution is visible in Grafana.
-
-    * Per-rank system telemetry
-        CPU / GPU / NVLink / disk / network are pushed every
-        ``cfg.monitoring.metrics.system_every_n_steps`` steps from
-        every rank, tagged with ``rank``.  This is what makes the
-        Ray Dashboard 'Cluster' view actually useful for finetuning
-        — each panel can be aggregated or broken out per-GPU.
-
-    * CUDA-allocator gauges
-        ``cuda/allocated_mib``, ``cuda/reserved_mib``, peak values.
-        These come from PyTorch directly (NVML can't see the caching
-        allocator) and catch fragmentation regressions early.
-
-    * Loss-spike, grad-norm, and LR distribution
-        Already had loss+grad_norm; we now also push
-        ``loss_running_avg``, ``loss_spike_ratio`` (loss / EMA),
-        ``param_norm`` (sqrt-sum-of-squares of trainable params).
-
-Existing correctness invariants are preserved:
-    * Loss averaging across the whole grad-accum window (not just
-      the last micro-batch).
-    * Autocast only for DDP — FSDP2's MixedPrecisionPolicy already
-      casts.
-    * Barrier before checkpoint.
-    * No redundant ``.to(device)`` after Ray's ``iter_torch_batches``.
+Existing invariants preserved:
+  * Loss averaging across the whole grad-accum window.
+  * Autocast only for DDP — FSDP2's MixedPrecisionPolicy already casts.
+  * Barrier before checkpoint.
 """
 from __future__ import annotations
 
@@ -77,7 +60,7 @@ def train(
 
     Args:
         model:       Distributed-wrapped model (FSDP2 or DDP).
-        dataset:     Ray Dataset pre-tokenised by bhaskera.data.
+        dataset:     Ray Dataset pre-tokenized by bhaskera.data.
         cfg:         Bhaskera Config object.
         profile:     ModelProfile from introspection.
         rank:        Global rank of this worker.
@@ -98,14 +81,11 @@ def train(
 
     best_ckpts: list[tuple[float, str]] = []
 
-    # ── Throughput / MFU tracker (per-rank) ─────────────────────────
-    metrics_cfg = getattr(getattr(cfg, "monitoring", None), "metrics", None)
-    throughput_on = bool(getattr(metrics_cfg, "throughput", True)) if metrics_cfg else True
-    peak_tflops   = float(getattr(metrics_cfg, "peak_tflops_per_gpu", 312.0)) if metrics_cfg else 312.0
+    # ── Throughput / MFU tracker ────────────────────────────────────
+    metrics_cfg    = getattr(getattr(cfg, "monitoring", None), "metrics", None)
+    throughput_on  = bool(getattr(metrics_cfg, "throughput", True)) if metrics_cfg else True
+    peak_tflops    = float(getattr(metrics_cfg, "peak_tflops_per_gpu", 312.0)) if metrics_cfg else 312.0
 
-    # Use total parameter count for MFU (LoRA still flows through the
-    # frozen base path).  Falls back to trainable params if total is
-    # zero for some reason.
     total_params     = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     params_for_flops = total_params or trainable_params
@@ -118,7 +98,6 @@ def train(
         warmup_steps=int(getattr(metrics_cfg, "throughput_warmup", 5)) if metrics_cfg else 5,
     ) if throughput_on else None
 
-    # Log model-size summary as run-scoped tags via the first push
     if tracker:
         tracker.log({
             "model/total_params":     float(total_params),
@@ -153,54 +132,58 @@ def _run_epoch(
     rank, local_rank, device, epoch, step, tracker, best_ckpts,
     throughput: Optional[ThroughputTracker], world_size: int,
 ):
-    train_cfg = cfg.training
-    ckpt_cfg  = cfg.checkpoint
+    train_cfg  = cfg.training
+    ckpt_cfg   = cfg.checkpoint
     grad_accum = train_cfg.grad_accum
 
-    # Mixed precision strategy
-    strategy = cfg.training.distributed.strategy.lower()
+    strategy       = cfg.training.distributed.strategy.lower()
     autocast_dtype = resolve_autocast_dtype(cfg, profile)
-    use_autocast = (strategy == "ddp" and device.type == "cuda")
+    use_autocast   = (strategy == "ddp" and device.type == "cuda")
 
-    # MoE config
-    moe_cfg = getattr(cfg, "moe", None)
-    aux_loss_weight    = getattr(moe_cfg, "aux_loss_weight",        0.01) if moe_cfg else 0.01
-    log_expert_util    = (
-        profile.is_moe
-        and moe_cfg is not None
+    moe_cfg         = getattr(cfg, "moe", None)
+    aux_loss_weight = getattr(moe_cfg, "aux_loss_weight", 0.01) if moe_cfg else 0.01
+    log_expert_util = (
+        profile.is_moe and moe_cfg is not None
         and getattr(moe_cfg, "log_expert_utilization", True)
     )
-    expert_log_every   = getattr(moe_cfg, "log_every_n_steps", 10) if moe_cfg else 10
+    expert_log_every = getattr(moe_cfg, "log_every_n_steps", 10) if moe_cfg else 10
 
-    # Monitoring cadence
     metrics_cfg = getattr(getattr(cfg, "monitoring", None), "metrics", None)
-    sys_every  = int(getattr(metrics_cfg, "system_every_n_steps", 10)) if metrics_cfg else 10
-    cuda_every = int(getattr(metrics_cfg, "cuda_every_n_steps", 10))   if metrics_cfg else 10
-    sys_on     = bool(getattr(metrics_cfg, "enabled", True))           if metrics_cfg else True
+    sys_every   = int(getattr(metrics_cfg, "system_every_n_steps", 10)) if metrics_cfg else 10
+    cuda_every  = int(getattr(metrics_cfg, "cuda_every_n_steps", 10))   if metrics_cfg else 10
+    sys_on      = bool(getattr(metrics_cfg, "enabled", True))           if metrics_cfg else True
 
-    # Data loader — Ray already places tensors on device.
+    # ── Data loader ─────────────────────────────────────────────────
+    # fix #16: use prefetch_batches from config
+    # fix loop: drop_last=True prevents shape mismatches in the last batch
+    # fix loop: explicit dtypes — int64 is required for CUDA embedding lookup
     loader = dataset.iter_torch_batches(
         batch_size=train_cfg.batch_size,
-        local_shuffle_buffer_size=1000,
+        local_shuffle_buffer_size=max(
+            train_cfg.batch_size * cfg.data.local_shuffle_buffer_multiplier, 1000
+        ),
         local_shuffle_seed=train_cfg.seed + rank,
-        prefetch_batches=2,
+        prefetch_batches=cfg.data.prefetch_batches,   # fix #16
+        drop_last=True,                               # fix loop: no shape mismatch
+        dtypes={                                      # fix loop: int64 for embeddings
+            "input_ids":      torch.long,
+            "attention_mask": torch.long,
+            "labels":         torch.long,
+        },
         device=device,
     )
 
-    # Per-accum-window accumulators
-    micro_losses:     list[torch.Tensor] = []
-    micro_aux_losses: list[torch.Tensor] = []
+    # Per-step accumulators
     epoch_loss     = 0.0
     epoch_aux_loss = 0.0
     epoch_steps    = 0
-    micro          = 0
 
     # Loss EMA (for spike detection)
     loss_ema: Optional[float] = None
-    loss_ema_alpha = 0.05  # ~20-step half life
+    loss_ema_alpha = 0.05
 
-    # Track tokens per accum window — used for throughput
-    window_tokens = 0
+    # Tokens/samples per accum window — for throughput
+    window_tokens  = 0
     window_samples = 0
     window_seq_len = 0
 
@@ -209,65 +192,92 @@ def _run_epoch(
     if throughput is not None:
         throughput.reset_step_clock()
 
-    for batch in loader:
-        if step >= train_cfg.max_steps:
+    # ── Training loop with no_sync fix ──────────────────────────────
+    # Invariant (non-negotiable):
+    #   model.no_sync() is used on every micro-step EXCEPT the last.
+    #   Without this, FSDP2 fires a full all-reduce on every micro-step,
+    #   multiplying NCCL traffic by grad_accum.
+    loader_iter = iter(loader)
+
+    while step < train_cfg.max_steps:
+        micro_losses:     list[torch.Tensor] = []
+        micro_aux_losses: list[torch.Tensor] = []
+        window_tokens  = 0
+        window_samples = 0
+
+        # ── Gradient accumulation loop with no_sync ──────────────────
+        for micro_step in range(grad_accum):
+            try:
+                batch = next(loader_iter)
+            except StopIteration:
+                # Epoch exhausted mid-accumulation window — stop cleanly
+                loader_iter = None  # type: ignore[assignment]
+                break
+
+            input_ids      = batch["input_ids"]
+            attention_mask = batch["attention_mask"]
+            labels         = batch["labels"]
+
+            try:
+                window_tokens  += int(attention_mask.sum().item())
+                window_samples += int(input_ids.size(0))
+                window_seq_len  = int(input_ids.size(1))
+            except Exception:
+                pass
+
+            is_last = (micro_step == grad_accum - 1)
+
+            # CRITICAL fix: no_sync suppresses the all-reduce on all
+            # micro-steps except the final one.  This is the key Phase 1
+            # performance fix — without it FSDP2 does grad_accum all-reduces
+            # per optimizer step instead of just one.
+            no_sync_ctx = contextlib.nullcontext() if is_last else model.no_sync()
+
+            autocast_ctx = (
+                torch.autocast("cuda", dtype=autocast_dtype)
+                if use_autocast
+                else contextlib.nullcontext()
+            )
+
+            with no_sync_ctx, autocast_ctx:
+                forward_kwargs = dict(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                    use_cache=False,
+                )
+                if profile.is_moe and profile.has_aux_loss:
+                    forward_kwargs["output_router_logits"] = True
+
+                out       = model(**forward_kwargs)
+                main_loss = out.loss
+                aux_loss  = extract_aux_loss(out, profile)
+
+                if aux_loss is not None:
+                    total_loss = (main_loss + aux_loss_weight * aux_loss) / grad_accum
+                else:
+                    total_loss = main_loss / grad_accum
+
+                total_loss.backward()
+
+            micro_losses.append(main_loss.detach())
+            if aux_loss is not None:
+                micro_aux_losses.append(aux_loss.detach())
+
+        # If loader exhausted mid-window, break the outer loop too
+        if loader_iter is None:
             break
 
-        input_ids      = batch["input_ids"]
-        attention_mask = batch["attention_mask"]
-        labels         = batch["labels"]
-
-        # Track tokens for throughput.  Use attention_mask sum — this
-        # ignores padding, which is the right denominator for "real"
-        # throughput.
-        try:
-            window_tokens  += int(attention_mask.sum().item())
-            window_samples += int(input_ids.size(0))
-            window_seq_len  = int(input_ids.size(1))
-        except Exception:
-            pass
-
-        # Forward
-        ctx = (
-            torch.autocast("cuda", dtype=autocast_dtype)
-            if use_autocast
-            else contextlib.nullcontext()
-        )
-        with ctx:
-            forward_kwargs = dict(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
-                use_cache=False,
-            )
-            if profile.is_moe and profile.has_aux_loss:
-                forward_kwargs["output_router_logits"] = True
-
-            out       = model(**forward_kwargs)
-            main_loss = out.loss
-            aux_loss  = extract_aux_loss(out, profile)
-
-            if aux_loss is not None:
-                total_loss = (main_loss + aux_loss_weight * aux_loss) / grad_accum
-            else:
-                total_loss = main_loss / grad_accum
-
-        # Backward — outside autocast
-        total_loss.backward()
-
-        micro_losses.append(main_loss.detach())
-        if aux_loss is not None:
-            micro_aux_losses.append(aux_loss.detach())
-        micro += 1
-
-        if micro < grad_accum:
-            continue
-
         # ── Optimizer step ──────────────────────────────────────────
-        grad_norm = torch.nn.utils.clip_grad_norm_(
-            (p for p in model.parameters() if p.requires_grad),
-            train_cfg.max_grad_norm,
-        ).item()
+        # Use model.clip_grad_norm_ for FSDP2 if available (handles sharded grads)
+        grad_clip = getattr(train_cfg, "grad_clip", None) or getattr(train_cfg, "max_grad_norm", 1.0)
+        if hasattr(model, "clip_grad_norm_"):
+            grad_norm = model.clip_grad_norm_(grad_clip).item()
+        else:
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                (p for p in model.parameters() if p.requires_grad),
+                grad_clip,
+            ).item()
 
         if not math.isfinite(grad_norm):
             logger.warning(
@@ -275,12 +285,6 @@ def _run_epoch(
                 f"Non-finite grad_norm={grad_norm} — skipping optimizer step"
             )
             optimizer.zero_grad(set_to_none=True)
-            micro = 0
-            micro_losses.clear()
-            micro_aux_losses.clear()
-            window_tokens = 0
-            window_samples = 0
-            # Push a 'skipped' counter so dashboards see the spike.
             if tracker:
                 tracker.log({"train/non_finite_grad": 1.0}, step=step)
             continue
@@ -289,15 +293,12 @@ def _run_epoch(
         scheduler.step()
         optimizer.zero_grad(set_to_none=True)
 
-        # ── Loss aggregation across the accum window ────────────────
+        # ── Loss aggregation ────────────────────────────────────────
         window_loss = torch.stack(micro_losses).mean().item()
         window_aux  = (
             torch.stack(micro_aux_losses).mean().item()
             if micro_aux_losses else 0.0
         )
-        micro_losses.clear()
-        micro_aux_losses.clear()
-        micro = 0
 
         # Loss EMA + spike ratio
         if loss_ema is None:
@@ -320,34 +321,26 @@ def _run_epoch(
                 samples_in_step=window_samples,
                 seq_len=window_seq_len,
             )
-        # Reset per-accum-window counters
-        window_tokens  = 0
-        window_samples = 0
 
         # ── Logging ────────────────────────────────────────────────
-        # Rank 0 always logs the loss family (this is what flows to
-        # W&B / MLflow).  Every rank logs system stats (gpu/cpu/io)
-        # so per-rank breakdowns show up in Grafana.
         if rank == 0:
             msg = (
                 f"[epoch {epoch}][step {step}] loss={window_loss:.4f} "
                 f"lr={lr:.2e} grad_norm={grad_norm:.4f}"
             )
             if "throughput/tokens_per_sec" in throughput_metrics:
-                msg += (
-                    f" tok/s={throughput_metrics['throughput/tokens_per_sec']:.0f}"
-                )
+                msg += f" tok/s={throughput_metrics['throughput/tokens_per_sec']:.0f}"
             if "throughput/mfu_pct" in throughput_metrics:
                 msg += f" MFU={throughput_metrics['throughput/mfu_pct']:.1f}%"
             logger.info(msg)
 
             metrics: dict[str, float] = {
-                "loss":              window_loss,
-                "lr":                lr,
-                "grad_norm":         grad_norm,
-                "epoch":             float(epoch),
-                "loss_running_avg":  loss_ema,
-                "loss_spike_ratio":  loss_spike,
+                "loss":             window_loss,
+                "lr":               lr,
+                "grad_norm":        grad_norm,
+                "epoch":            float(epoch),
+                "loss_running_avg": loss_ema,
+                "loss_spike_ratio": loss_spike,
             }
             if profile.is_moe:
                 metrics["aux_loss"]   = window_aux
@@ -359,8 +352,6 @@ def _run_epoch(
                     metrics.update(compute_expert_utilization(out, profile))
                 tracker.log(metrics, step=step)
 
-        # System telemetry from EVERY rank — tagged with rank in the
-        # logger so Grafana can break out per-GPU.
         if tracker and sys_on and sys_every > 0 and step % sys_every == 0:
             sysm: dict[str, float] = {}
             sysm.update(system_stats(
@@ -378,7 +369,7 @@ def _run_epoch(
 
     avg_loss = epoch_loss / epoch_steps
     if rank == 0:
-        epoch_msg = f"[epoch {epoch}] avg_loss={avg_loss:.4f}"
+        epoch_msg     = f"[epoch {epoch}] avg_loss={avg_loss:.4f}"
         epoch_metrics = {"epoch_avg_loss": avg_loss, "epoch": epoch}
         if profile.is_moe:
             avg_aux = epoch_aux_loss / epoch_steps
@@ -388,7 +379,6 @@ def _run_epoch(
         if tracker:
             tracker.log(epoch_metrics, step=step)
 
-    # Barrier before checkpoint — other ranks may still be exiting the loop.
     if dist.is_available() and dist.is_initialized():
         dist.barrier()
 

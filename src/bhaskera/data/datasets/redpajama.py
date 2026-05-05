@@ -1,15 +1,26 @@
-"""RedPajama sample dataset."""
+"""RedPajama-Data-1T sample dataset (togethercomputer/RedPajama-Data-1T-Sample).
+
+Phase 1: split into a raw builder (registered via @register_raw) and a
+tokenized builder (registered via @register).  The raw builder is used by
+bhaskera-tokenize to persist a one-shot tokenization to disk.
+"""
 from __future__ import annotations
 
 import ray.data
 
-from bhaskera.data.registry import register
+from bhaskera.data.registry import register, register_raw
 from bhaskera.data.tokenize import tokenize_dataset
 
 
-@register("redpajama")
-def build(cfg) -> ray.data.Dataset:
+@register_raw("redpajama", text_col="text")
+def _build_raw(cfg) -> ray.data.Dataset:
+    """Return the raw (un-tokenized) RedPajama dataset."""
     from datasets import load_dataset
     hf_ds = load_dataset("togethercomputer/RedPajama-Data-1T-Sample", split="train")
-    ds = ray.data.from_huggingface(hf_ds)
-    return tokenize_dataset(ds, cfg, text_col="text")
+    return ray.data.from_huggingface(hf_ds)
+
+
+@register("redpajama")
+def build(cfg, world_size: int = 1) -> ray.data.Dataset:
+    """Return the tokenized RedPajama dataset, using cache if available."""
+    return tokenize_dataset(_build_raw(cfg), cfg, "text", world_size=world_size)

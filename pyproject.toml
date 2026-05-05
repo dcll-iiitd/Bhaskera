@@ -42,9 +42,10 @@ inference = ["scipy>=1.10"]
 observability = ["wandb>=0.16", "mlflow>=2.10"]
 
 [project.scripts]
-bhaskera-train = "bhaskera.launcher.train:main"
-bhaskera-diag  = "bhaskera.launcher.diagnostics:main"
-bhaskera-infer = "bhaskera.launcher.infer:main"
+bhaskera-train    = "bhaskera.launcher.train:main"
+bhaskera-diag     = "bhaskera.launcher.diagnostics:main"
+bhaskera-infer    = "bhaskera.launcher.infer:main"
+bhaskera-tokenize = "bhaskera.launcher.tokenize:main"   # fix #28
 
 [tool.setuptools.packages.find]
 where = ["src"]
