@@ -19,6 +19,13 @@ Then training will skip tokenization entirely and load directly from disk.
 
 fix #28: adds bhaskera-tokenize CLI entrypoint.
 fix #2:  uses persist_tokenized() so subsequent runs hit the cache.
+fix #29: _prefetch_tokenizer() downloads the tokenizer in the main process
+         before Ray workers are spawned.  Without this, all N Ray workers
+         simultaneously call AutoTokenizer.from_pretrained() on their first
+         batch, racing to download the same files and either hitting HF Hub
+         rate limits or saturating the network — causing the MapBatches stage
+         to stall at 0 rows for several minutes with a misleading
+         [backpressured:tasks(ConcurrencyCap)] warning.
 """
 from __future__ import annotations
 
@@ -35,6 +42,106 @@ logger = logging.getLogger(__name__)
 
 _BOX_WIDTH = 72
 
+
+# ---------------------------------------------------------------------------
+# Tokenizer prefetch (fix #29)
+# ---------------------------------------------------------------------------
+
+def _prefetch_tokenizer(cfg) -> None:
+    """
+    Download and cache the tokenizer in the main process BEFORE Ray is
+    initialised.
+
+    Why this matters
+    ────────────────
+    _TokenizerActorFactory initialises its TokenizerActor lazily on the
+    first batch call inside each Ray worker:
+
+        def __call__(self, batch):
+            if self._actor is None:
+                self._actor = TokenizerActor(model_name, ...)  ← download here
+
+    When the tokenizer is not yet in the local HF cache, every worker tries
+    to download it simultaneously the moment Ray starts dispatching batches.
+    With num_workers=16 this means 16 concurrent downloads of the same
+    files, which saturates the connection and hits HF Hub rate limits —
+    leaving MapBatches stuck at 0 rows with a misleading
+    [backpressured:tasks(ConcurrencyCap)] log line.
+
+    By calling AutoTokenizer.from_pretrained() once here (single process,
+    single network connection), the tokenizer lands in the HF cache on disk.
+    All Ray workers then find it locally and load in milliseconds with zero
+    network traffic.
+
+    Strategy
+    ────────
+    1. Try local_files_only=True first — instant return if already cached.
+    2. On cache miss (OSError), fall back to a normal download.
+    3. Any other error is logged as a warning; the tokenizer workers will
+       still attempt their own download and may succeed (e.g. transient
+       network hiccup here but fine later).
+
+    Args:
+        cfg: Bhaskera Config object (model.name and model.trust_remote_code
+             must already be set from the loaded YAML + CLI overrides).
+    """
+    from transformers import AutoTokenizer
+
+    model_name        = cfg.model.name
+    trust_remote_code = getattr(cfg.model, "trust_remote_code", False)
+
+    logger.info(
+        f"Prefetching tokenizer for '{model_name}' in main process "
+        f"(trust_remote_code={trust_remote_code}) …"
+    )
+
+    # ── Step 1: check local cache first (zero network, instant) ─────
+    try:
+        tok = AutoTokenizer.from_pretrained(
+            model_name,
+            trust_remote_code=trust_remote_code,
+            local_files_only=True,
+        )
+        logger.info(
+            f"Tokenizer already cached locally — skipping download. "
+            f"vocab_size={tok.vocab_size}"
+        )
+        return
+    except OSError:
+        # Not in cache — fall through to download
+        pass
+    except Exception as e:
+        # Unexpected error on the local check — don't abort, just warn
+        logger.warning(
+            f"Unexpected error during local tokenizer check: {e}. "
+            "Will attempt download."
+        )
+
+    # ── Step 2: download (single process, no Ray worker contention) ──
+    try:
+        tok = AutoTokenizer.from_pretrained(
+            model_name,
+            trust_remote_code=trust_remote_code,
+            local_files_only=False,
+        )
+        logger.info(
+            f"Tokenizer downloaded and cached successfully. "
+            f"vocab_size={tok.vocab_size}"
+        )
+    except Exception as e:
+        # Non-fatal: Ray workers will still try on their own.
+        # Log clearly so the user knows what happened.
+        logger.warning(
+            f"Tokenizer prefetch failed: {e}\n"
+            "Ray workers will attempt to download the tokenizer themselves. "
+            "If all workers stall at MapBatches with 0 rows, this is why — "
+            "check your network connection or HF Hub access."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     args = _parse_args()
@@ -63,6 +170,11 @@ def main() -> None:
 
     dataset_name = cfg.data.name
     logger.info(f"bhaskera-tokenize | dataset={dataset_name!r} | config={args.config!r}")
+
+    # ── Prefetch tokenizer BEFORE Ray init (fix #29) ────────────────
+    # Must happen here, in the single driver process, so all subsequent
+    # Ray workers find the tokenizer already on disk.
+    _prefetch_tokenizer(cfg)
 
     # ── Init Ray (no monitoring — headless tokenization job) ────────
     import ray
@@ -114,6 +226,10 @@ def main() -> None:
     # ── Print result banner ─────────────────────────────────────────
     _print_result_box(cache_path, dataset_name, cfg)
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _print_result_box(cache_path: str, dataset_name: str, cfg) -> None:
     """Print a copy-pasteable config snippet inside a box."""
