@@ -33,7 +33,8 @@ import argparse
 import logging
 import os
 import sys
-
+import psutil
+import shutil
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s][%(name)s] %(levelname)s %(message)s",
@@ -41,7 +42,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _BOX_WIDTH = 72
+def get_available_cpus() -> int:
+    """
+    Detect available CPUs in order of priority:
+    1. SLURM allocation   — HPC clusters
+    2. CPU affinity       — Docker / cgroups / taskset
+    3. Physical CPU count — bare metal fallback
+    """
+    # SLURM
+    slurm_cpus = (
+        os.environ.get("SLURM_CPUS_ON_NODE") or
+        os.environ.get("SLURM_CPUS_PER_TASK")
+    )
+    if slurm_cpus:
+        return int(slurm_cpus)
 
+    # Docker / cgroups / taskset (returns only the cores this process can use)
+    try:
+        affinity = len(os.sched_getaffinity(0))
+        if affinity:
+            return affinity
+    except AttributeError:
+        pass  # Windows doesn't have sched_getaffinity
+
+    # Bare metal fallback
+    return os.cpu_count() or 4
 
 # ---------------------------------------------------------------------------
 # Tokenizer prefetch (fix #29)
@@ -175,13 +200,16 @@ def main() -> None:
     # Must happen here, in the single driver process, so all subsequent
     # Ray workers find the tokenizer already on disk.
     _prefetch_tokenizer(cfg)
-
+    total_ram = psutil.virtual_memory().total
+    shm_free  = shutil.disk_usage("/dev/shm").total
+    object_store_memory = int(min(0.6 * total_ram, 0.8 * shm_free))
     # ── Init Ray (no monitoring — headless tokenization job) ────────
     import ray
     ray.init(
-        num_cpus=os.cpu_count(),
+        num_cpus=get_available_cpus(),
         include_dashboard=False,
         ignore_reinit_error=True,
+        object_store_memory=object_store_memory,
     )
     logger.info("Ray initialized for tokenization.")
 

@@ -428,7 +428,7 @@ def _apply_map_batches(
         batch_format="numpy",
         batch_size=batch_size,    # fix #27: was hard-coded 256
         num_cpus=1,
-        concurrency=num_workers,
+        concurrency=min(num_workers, 8),
         # fix #16: compression cuts downstream read I/O substantially
         # (Note: map_batches output_compression is supported in Ray >= 2.6)
     )
