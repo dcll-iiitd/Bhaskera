@@ -4,11 +4,14 @@ bhaskera.trainer.loop
 Pure training loop.
 
 Phase 1 fixes:
-  loop (critical) — model.no_sync() is now used on all but the last micro-step
-                    of gradient accumulation.  Without this, FSDP2 fires a full
-                    all-reduce on EVERY micro-step, multiplying NCCL communication
-                    cost by grad_accum.  This fix reduces per-step NCCL traffic
-                    by (grad_accum - 1) / grad_accum.
+  loop (critical) — gradient-sync suppression during accumulation now uses
+                    FSDP2's set_requires_gradient_sync() instead of the
+                    FSDP1-style model.no_sync() context manager.
+                    model.no_sync() is NOT available on FSDP2-wrapped models,
+                    and PEFT wrappers (PeftModel / LoraModel) do not delegate
+                    it through __getattr__.  set_requires_gradient_sync()
+                    operates directly on the underlying FSDP state and is
+                    immune to wrapper chains.
   fix #16         — iter_torch_batches uses prefetch_batches from config.
   loop            — drop_last=True prevents shape mismatches in the last batch.
   loop            — explicit dtypes in iter_torch_batches (int64 for embedding lookup).
@@ -38,6 +41,35 @@ from .optim import build_optimizer, build_scheduler
 from .precision import resolve_autocast_dtype
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# FSDP2 gradient-sync helper
+# ---------------------------------------------------------------------------
+
+def _set_grad_sync(model: torch.nn.Module, enabled: bool) -> None:
+    """
+    Toggle gradient all-reduce for all FSDP2-managed submodules.
+
+    FSDP2 (fully_shard) does not expose a top-level no_sync() context
+    manager — that was an FSDP1 API.  Instead, FSDP2 provides
+    set_requires_gradient_sync(), which recursively sets the sync flag on
+    every sharded submodule regardless of any PEFT / wrapper layers sitting
+    on top.
+
+    Call with enabled=False before every micro-step except the last, and
+    enabled=True on the last micro-step (or after the accumulation window)
+    so the all-reduce fires exactly once per optimizer step.
+
+    Falls back silently for DDP or non-distributed models (which don't have
+    FSDP2 state and don't need this toggle at all).
+    """
+    try:
+        from torch.distributed._composable.fsdp import set_requires_gradient_sync
+        set_requires_gradient_sync(model, enabled)
+    except Exception:
+        # Not an FSDP2 model, or older PyTorch — no-op is safe.
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -192,11 +224,15 @@ def _run_epoch(
     if throughput is not None:
         throughput.reset_step_clock()
 
-    # ── Training loop with no_sync fix ──────────────────────────────
-    # Invariant (non-negotiable):
-    #   model.no_sync() is used on every micro-step EXCEPT the last.
-    #   Without this, FSDP2 fires a full all-reduce on every micro-step,
-    #   multiplying NCCL traffic by grad_accum.
+    # ── Training loop ───────────────────────────────────────────────
+    # Gradient-sync invariant (non-negotiable):
+    #   All-reduce must fire exactly ONCE per optimizer step — on the last
+    #   micro-step of every accumulation window.  For FSDP2 we achieve this
+    #   with set_requires_gradient_sync(model, False/True) rather than the
+    #   FSDP1 model.no_sync() context manager.  The FSDP1 API does not exist
+    #   on FSDP2-wrapped models and is not delegated through PEFT wrappers.
+    #   set_requires_gradient_sync() bypasses wrapper __getattr__ chains and
+    #   operates directly on the FSDP2 submodule state.
     loader_iter = iter(loader)
 
     while step < train_cfg.max_steps:
@@ -205,7 +241,7 @@ def _run_epoch(
         window_tokens  = 0
         window_samples = 0
 
-        # ── Gradient accumulation loop with no_sync ──────────────────
+        # ── Gradient accumulation loop ───────────────────────────────
         for micro_step in range(grad_accum):
             try:
                 batch = next(loader_iter)
@@ -227,11 +263,12 @@ def _run_epoch(
 
             is_last = (micro_step == grad_accum - 1)
 
-            # CRITICAL fix: no_sync suppresses the all-reduce on all
-            # micro-steps except the final one.  This is the key Phase 1
-            # performance fix — without it FSDP2 does grad_accum all-reduces
-            # per optimizer step instead of just one.
-            no_sync_ctx = contextlib.nullcontext() if is_last else model.no_sync()
+            # FSDP2 gradient-sync toggle:
+            #   False  → suppress all-reduce on this micro-step
+            #   True   → allow all-reduce on the final micro-step
+            # This replaces the FSDP1 `model.no_sync()` context manager which
+            # is not available on FSDP2 and breaks with PEFT wrappers.
+            _set_grad_sync(model, enabled=is_last)
 
             autocast_ctx = (
                 torch.autocast("cuda", dtype=autocast_dtype)
@@ -239,7 +276,7 @@ def _run_epoch(
                 else contextlib.nullcontext()
             )
 
-            with no_sync_ctx, autocast_ctx:
+            with autocast_ctx:
                 forward_kwargs = dict(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -267,6 +304,10 @@ def _run_epoch(
         # If loader exhausted mid-window, break the outer loop too
         if loader_iter is None:
             break
+
+        # Ensure sync is re-enabled after the accumulation window in case
+        # something above exited early (e.g. StopIteration on last micro-step).
+        _set_grad_sync(model, enabled=True)
 
         # ── Optimizer step ──────────────────────────────────────────
         # Use model.clip_grad_norm_ for FSDP2 if available (handles sharded grads)
