@@ -10,7 +10,6 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:2                   # request 2 GPUs per node (2x A100)
-#SBATCH --mem=96G
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/inference-%j.out
 #SBATCH --error=logs/inference-%j.err
