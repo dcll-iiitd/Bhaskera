@@ -142,12 +142,12 @@ monitoring:
   metrics_export_port: 8080     # Prometheus scrapes this on each node
 
   prometheus:
-    enabled: false              # set true if you have a Prometheus server
+    enabled: true              # set true if you have a Prometheus server
     host: "http://localhost:9090"
     name: "Prometheus"
 
   grafana:
-    enabled: false              # set true to embed panels in the Ray Dashboard
+    enabled: true              # set true to embed panels in the Ray Dashboard
     host: "http://localhost:3000"
     iframe_host: null
     org_id: "1"

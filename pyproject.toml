@@ -14,6 +14,7 @@ dependencies = [
     "ray[train,data,default]>=2.10",
     "peft>=0.10",
     "pyyaml>=6.0",
+    "requests>=2.31",
     "accelerate>=0.20",
     "datasets>=2.0",
     "numpy>=1.24",
@@ -46,7 +47,7 @@ bhaskera-train    = "bhaskera.launcher.train:main"
 bhaskera-diag     = "bhaskera.launcher.diagnostics:main"
 bhaskera-infer    = "bhaskera.launcher.infer:main"
 bhaskera-tokenize = "bhaskera.launcher.tokenize:main"   # fix #28
-
+bhaskera-dashboard = "bhaskera.launcher.dashboard:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
