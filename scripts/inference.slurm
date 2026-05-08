@@ -1,14 +1,26 @@
 #!/bin/bash
 # Slurm job script to run Param2 inference using Bhaskera
-# Usage examples:
-#  sbatch scripts/inference.slurm                     # uses defaults
-#  CONFIG=configs/param2.yaml PROMPT_FILE=prompts.txt sbatch scripts/inference.slurm
+# For clusters with 2 GPUs per node (2x A100). For single-node runs.
+# Usage example:
+#   sbatch scripts/inference.slurm --config configs/param2.yaml --output-file outputs/param2_raw.txt --prompt "Explain attention."
 
 #SBATCH --job-name=bhaskera-param2-infer
+#SBATCH --partition=gpu
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:2                   # request 2 GPUs per node (2x A100)
+#SBATCH --mem=96G
+#SBATCH --time=02:00:00
+#SBATCH --output=logs/inference-%j.out
+#SBATCH --error=logs/inference-%j.err
+
+set -euo pipefail
+
 mkdir -p logs outputs
 
 # This script forwards all provided arguments to the Bhaskera inference CLI
-# Usage: sbatch scripts/inference.slurm --config cfg.yaml --output-file out.txt --prompt "..."
+# Example: sbatch scripts/inference.slurm --config cfg.yaml --output-file out.txt --prompt "..."
 
 ARGS=("$@")
 
@@ -17,14 +29,12 @@ extract_arg() {
   for a in "$@"; do
     case "$a" in
       "$name")
-        # next token is the value (if present)
         continue
         ;;
       "$name"=*)
         echo "${a#*=}"; return 0 ;;
     esac
   done
-  # handle --name value form
   prev=""
   for a in "$@"; do
     if [ "$prev" = "$name" ]; then
@@ -55,32 +65,13 @@ if [ -z "${PROMPT_VAL}" ] && [ -z "${PROMPT_FILE_VAL}" ]; then
   exit 1
 fi
 
-# Determine GPUs/CPUs (allow overriding via SBATCH envs or explicit vars)
-GPUS=${GPUS:-1}
+# Use SBATCH allocation for GPUs; allow overriding CPU count via SBATCH
 CPUS=${SLURM_CPUS_PER_TASK:-8}
 
 export OMP_NUM_THREADS=${CPUS}
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
 
-echo "Running: srun --gres=gpu:${GPUS} python -u -m bhaskera.launcher.infer ${ARGS[*]}"
-srun --gres=gpu:${GPUS} python -u -m bhaskera.launcher.infer "${ARGS[@]}"
-if [ -n "${KV_CACHE:-}" ]; then
-  ARGS+=(--kv-cache "${KV_CACHE}")
-fi
-if [ -n "${TEMPERATURE:-}" ]; then
-  ARGS+=(--temperature "${TEMPERATURE}")
-fi
-if [ -n "${TOP_P:-}" ]; then
-  ARGS+=(--top-p "${TOP_P}")
-fi
-
-if [ -n "${PROMPT_FILE:-}" ]; then
-  ARGS+=(--prompt-file "${PROMPT_FILE}" --output-file "${OUTPUT_FILE}")
-else
-  ARGS+=(--prompt "${PROMPT}" --output-file "${OUTPUT_FILE}")
-fi
-
-# Run (use python -m to ensure package-relative import works without installation)
-echo "Running: srun --gres=gpu:${GPUS} python -u -m bhaskera.launcher.infer ${ARGS[*]}"
-srun --gres=gpu:${GPUS} python -u -m bhaskera.launcher.infer "${ARGS[@]}"
+echo "Running: srun --ntasks=1 --cpus-per-task=${CPUS} python -u -m bhaskera.launcher.infer ${ARGS[*]}"
+# Rely on SBATCH --gres allocation for GPUs; do not pass --gres to srun to avoid cluster-specific errors
+srun --ntasks=1 --cpus-per-task=${CPUS} python -u -m bhaskera.launcher.infer "${ARGS[@]}"
