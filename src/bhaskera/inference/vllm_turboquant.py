@@ -42,14 +42,55 @@ Deployment:
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import math
+import os
 from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
+
+
+def _vllm_orchestration_mode() -> str:
+    """Return the requested vLLM orchestration mode: auto | ray | direct."""
+    return os.environ.get("BHASKERA_VLLM_ORCHESTRATION", "auto").strip().lower()
+
+
+def _should_use_ray_for_vllm() -> bool:
+    mode = _vllm_orchestration_mode()
+    if mode == "direct":
+        return False
+    if mode == "ray":
+        return True
+    try:
+        import ray  # type: ignore  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _init_ray_for_vllm(num_gpus: int) -> None:
+    """Initialise or join Ray before constructing the vLLM backend."""
+    import ray  # type: ignore
+
+    if ray.is_initialized():
+        return
+
+    address = os.environ.get("RAY_ADDRESS")
+    if address:
+        logger.info(f"[vLLMTQ] Connecting to Ray cluster at {address}")
+        ray.init(address=address)
+        return
+
+    logger.info(f"[vLLMTQ] Starting local Ray session for vLLM ({num_gpus} GPU(s))")
+    ray.init(
+        ignore_reinit_error=True,
+        num_cpus=os.cpu_count() or 1,
+        num_gpus=num_gpus,
+    )
 
 # ---------------------------------------------------------------------------
 # Triton kernel (optional — falls back to PyTorch if not available)
@@ -488,7 +529,7 @@ class _VLLMTurboQuantBackend:
     """
 
     def __init__(self, model_name: str, cfg, device: torch.device,
-                 tq_cfg=None):
+                 tq_cfg=None, tensor_parallel_size: Optional[int] = None):
         from vllm import LLM, SamplingParams  # type: ignore
 
         self._cfg    = cfg
@@ -499,7 +540,11 @@ class _VLLMTurboQuantBackend:
         raw_dtype = getattr(cfg.model, "dtype", "bfloat16")
         dtype_str = "bfloat16" if raw_dtype in ("auto", "bfloat16") else raw_dtype
 
-        n_gpus = torch.cuda.device_count() if device.type == "cuda" else 1
+        n_gpus = tensor_parallel_size or (torch.cuda.device_count() if device.type == "cuda" else 1)
+        use_ray = _should_use_ray_for_vllm() and device.type == "cuda"
+
+        if use_ray:
+            _init_ray_for_vllm(n_gpus)
 
         # Detect if TurboQuant kv-cache-dtype is natively supported
         # (requires mitkox/vllm-turboquant source build)
@@ -514,6 +559,20 @@ class _VLLMTurboQuantBackend:
             gpu_memory_utilization = 0.90,
             enable_chunked_prefill = True,
         )
+
+        if use_ray:
+            try:
+                sig = inspect.signature(LLM.__init__)
+                if "distributed_executor_backend" in sig.parameters:
+                    vllm_kwargs["distributed_executor_backend"] = "ray"
+                    logger.info("[vLLMTQ] Ray executor backend enabled")
+                else:
+                    logger.warning(
+                        "[vLLMTQ] Installed vLLM does not expose distributed_executor_backend; "
+                        "continuing with Ray initialised but direct backend path"
+                    )
+            except Exception as e:
+                logger.warning(f"[vLLMTQ] Could not inspect vLLM executor options: {e}")
 
         if tq_native and tq_cfg is not None:
             # Native path: mitkox-style turboquant35/turboquant25

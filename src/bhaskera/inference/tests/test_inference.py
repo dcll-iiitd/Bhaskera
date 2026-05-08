@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import math
 import time
+import sys
+import types
 import pytest
 import torch
 import torch.nn.functional as F
@@ -345,3 +347,24 @@ class TestInferenceConfig:
         cfg = load_config(str(p))
         assert cfg.inference.max_new_tokens == 256
         assert cfg.inference.turboquant.key_bits == 3
+
+
+# ===========================================================================
+# Ray orchestration toggle for vLLM
+# ===========================================================================
+
+class TestVLLMRayOrchestration:
+    def test_direct_mode_disables_ray(self, monkeypatch):
+        from bhaskera.inference import vllm_turboquant
+
+        monkeypatch.setenv("BHASKERA_VLLM_ORCHESTRATION", "direct")
+        assert vllm_turboquant._should_use_ray_for_vllm() is False
+
+    def test_ray_mode_enables_ray_when_available(self, monkeypatch):
+        from bhaskera.inference import vllm_turboquant
+
+        fake_ray = types.ModuleType("ray")
+        fake_ray.is_initialized = lambda: False
+        monkeypatch.setitem(sys.modules, "ray", fake_ray)
+        monkeypatch.setenv("BHASKERA_VLLM_ORCHESTRATION", "ray")
+        assert vllm_turboquant._should_use_ray_for_vllm() is True
