@@ -81,6 +81,6 @@ export OMP_NUM_THREADS=${CPUS}
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
 
-echo "Running: srun --ntasks=1 --cpus-per-task=${CPUS} python -u -m bhaskera.launcher.infer ${ARGS[*]}"
+echo "Running: srun --unbuffered --ntasks=1 --cpus-per-task=${CPUS} python -u -m bhaskera.launcher.infer ${ARGS[*]}"
 # Rely on SBATCH --gres allocation for GPUs; do not pass --gres to srun to avoid cluster-specific errors
-srun --ntasks=1 --cpus-per-task=${CPUS} python -u -m bhaskera.launcher.infer "${ARGS[@]}"
+srun --unbuffered --ntasks=1 --cpus-per-task=${CPUS} python -u -m bhaskera.launcher.infer "${ARGS[@]}"
