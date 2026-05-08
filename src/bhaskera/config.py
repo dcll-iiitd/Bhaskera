@@ -101,18 +101,38 @@ class DataConfig:
     name: str = "ultrachat"
     seq_len: int = 2048
     num_workers: int = 4
-    # ── Phase 1 additions ────────────────────────────────────────────────────
-    # fix #17 — CLI wiring for pre-tokenized datasets
+ 
+    # ── Phase 1: persistent-cache plumbing ─────────────────────────────────
     tokenized_path: Optional[str] = None
     cache_dir: Optional[str] = None
     overwrite_cache: bool = False
-    # fix #27 — was hard-coded 256; OOMs at seq_len > 2048
     tokenize_batch_size: int = 128
-    # fix #16 — compression and prefetch
-    tokenize_compression: str = "snappy"   # snappy | zstd | none
+    tokenize_compression: str = "snappy"     # snappy | zstd | none
     prefetch_batches: int = 2
     local_shuffle_buffer_multiplier: int = 10
     pack_sequences: bool = False
+ 
+    # ── Phase 2: chat-format / local-files plumbing ────────────────────────
+    # Name of a registered format renderer (chatml, alpaca, sharegpt, or
+    # whatever you @register_format yourself). When set, TokenizerActor
+    # renders each row to a single string before tokenising.
+    format: Optional[str] = None
+    # Free-form dict passed to the renderer. Hashed into the cache key,
+    # so changing it triggers a re-tokenize automatically.
+    format_options: dict = field(default_factory=dict)
+ 
+    # Local data sources (used by the "local" dataset and the tokenize CLI).
+    # Each may be a single file, a directory, or a glob pattern.
+    path: Optional[str] = None        # single-source shorthand (used as train)
+    train_path: Optional[str] = None
+    val_path: Optional[str] = None
+ 
+    # Optional pre-tokenized validation set, populated by bhaskera-tokenize
+    # when run with --split both. Loaded by the trainer alongside
+    # tokenized_path. (Wire this into your training loop where it makes
+    # sense — see launcher/train.py.)
+    val_tokenized_path: Optional[str] = None
+
 
 
 @dataclass
@@ -297,7 +317,8 @@ def _dict_to_config(raw: dict) -> Config:
             name=data_raw.get("name", "ultrachat"),
             seq_len=int(data_raw.get("seq_len", 2048)),
             num_workers=int(data_raw.get("num_workers", 4)),
-            # Phase 1 additions
+ 
+            # Phase 1
             tokenized_path=data_raw.get("tokenized_path"),
             cache_dir=data_raw.get("cache_dir"),
             overwrite_cache=bool(data_raw.get("overwrite_cache", False)),
@@ -308,6 +329,14 @@ def _dict_to_config(raw: dict) -> Config:
                 data_raw.get("local_shuffle_buffer_multiplier", 10)
             ),
             pack_sequences=bool(data_raw.get("pack_sequences", False)),
+ 
+            # Phase 2
+            format=data_raw.get("format"),
+            format_options=dict(data_raw.get("format_options", {}) or {}),
+            path=data_raw.get("path"),
+            train_path=data_raw.get("train_path"),
+            val_path=data_raw.get("val_path"),
+            val_tokenized_path=data_raw.get("val_tokenized_path"),
         ),
         lora=LoraConfig(
             enabled=bool(lora_raw.get("enabled", False)),

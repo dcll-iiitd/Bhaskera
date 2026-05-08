@@ -4,28 +4,32 @@ bhaskera.launcher.tokenize
 One-shot CLI that tokenizes a dataset, writes to persistent storage, and
 prints the config snippet to paste into your training config.
 
-Usage:
-    bhaskera-tokenize --config configs/config.yaml
-    bhaskera-tokenize --config configs/config.yaml --dataset ultrachat
-    bhaskera-tokenize --config configs/config.yaml --storage-path /scratch/cache
-    bhaskera-tokenize --config configs/config.yaml --overwrite --num-workers 16
+Usage examples
+--------------
+HF dataset (unchanged):
+    bhaskera-tokenize --config configs/tokenize.yaml
 
-After running, paste the printed YAML snippet into your config:
+Local JSONL with ChatML (your case):
+    bhaskera-tokenize --config configs/local_chatml.yaml --split both
+
+Override paths from the CLI:
+    bhaskera-tokenize --config configs/local_chatml.yaml \\
+        --train-path /data/train.jsonl --val-path /data/val.jsonl \\
+        --format chatml --split both
+
+After running, paste the printed YAML snippet into your training config:
 
     data:
-      tokenized_path: "/scratch/cache/ultrachat_<hash>"
+      name: local
+      tokenized_path:     "/scratch/cache/local_train_<hash>"
+      val_tokenized_path: "/scratch/cache/local_val_<hash>"
 
-Then training will skip tokenization entirely and load directly from disk.
-
-fix #28: adds bhaskera-tokenize CLI entrypoint.
-fix #2:  uses persist_tokenized() so subsequent runs hit the cache.
-fix #29: _prefetch_tokenizer() downloads the tokenizer in the main process
-         before Ray workers are spawned.  Without this, all N Ray workers
-         simultaneously call AutoTokenizer.from_pretrained() on their first
-         batch, racing to download the same files and either hitting HF Hub
-         rate limits or saturating the network — causing the MapBatches stage
-         to stall at 0 rows for several minutes with a misleading
-         [backpressured:tasks(ConcurrencyCap)] warning.
+Phase 2 additions:
+  * --split {train,val,both}   — which split(s) to tokenize.
+  * --format NAME              — overrides cfg.data.format.
+  * --train-path / --val-path  — override cfg.data.{train,val}_path.
+  * Per-split cache dir name (``local_train_<hash>`` vs ``local_val_<hash>``)
+    so the two never collide.
 """
 from __future__ import annotations
 
@@ -33,134 +37,53 @@ import argparse
 import logging
 import os
 import sys
-import psutil
-import shutil
+from typing import List
+
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s][%(name)s] %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-_BOX_WIDTH = 72
-def get_available_cpus() -> int:
-    """
-    Detect available CPUs in order of priority:
-    1. SLURM allocation   — HPC clusters
-    2. CPU affinity       — Docker / cgroups / taskset
-    3. Physical CPU count — bare metal fallback
-    """
-    # SLURM
-    slurm_cpus = (
-        os.environ.get("SLURM_CPUS_ON_NODE") or
-        os.environ.get("SLURM_CPUS_PER_TASK")
-    )
-    if slurm_cpus:
-        return int(slurm_cpus)
+_BOX_WIDTH = 78
 
-    # Docker / cgroups / taskset (returns only the cores this process can use)
-    try:
-        affinity = len(os.sched_getaffinity(0))
-        if affinity:
-            return affinity
-    except AttributeError:
-        pass  # Windows doesn't have sched_getaffinity
-
-    # Bare metal fallback
-    return os.cpu_count() or 4
 
 # ---------------------------------------------------------------------------
-# Tokenizer prefetch (fix #29)
+# Tokenizer prefetch (fix #29 — unchanged)
 # ---------------------------------------------------------------------------
 
 def _prefetch_tokenizer(cfg) -> None:
-    """
-    Download and cache the tokenizer in the main process BEFORE Ray is
-    initialised.
-
-    Why this matters
-    ────────────────
-    _TokenizerActorFactory initialises its TokenizerActor lazily on the
-    first batch call inside each Ray worker:
-
-        def __call__(self, batch):
-            if self._actor is None:
-                self._actor = TokenizerActor(model_name, ...)  ← download here
-
-    When the tokenizer is not yet in the local HF cache, every worker tries
-    to download it simultaneously the moment Ray starts dispatching batches.
-    With num_workers=16 this means 16 concurrent downloads of the same
-    files, which saturates the connection and hits HF Hub rate limits —
-    leaving MapBatches stuck at 0 rows with a misleading
-    [backpressured:tasks(ConcurrencyCap)] log line.
-
-    By calling AutoTokenizer.from_pretrained() once here (single process,
-    single network connection), the tokenizer lands in the HF cache on disk.
-    All Ray workers then find it locally and load in milliseconds with zero
-    network traffic.
-
-    Strategy
-    ────────
-    1. Try local_files_only=True first — instant return if already cached.
-    2. On cache miss (OSError), fall back to a normal download.
-    3. Any other error is logged as a warning; the tokenizer workers will
-       still attempt their own download and may succeed (e.g. transient
-       network hiccup here but fine later).
-
-    Args:
-        cfg: Bhaskera Config object (model.name and model.trust_remote_code
-             must already be set from the loaded YAML + CLI overrides).
-    """
+    """Download the tokenizer once in the driver before Ray spawns workers."""
     from transformers import AutoTokenizer
 
     model_name        = cfg.model.name
     trust_remote_code = getattr(cfg.model, "trust_remote_code", False)
 
     logger.info(
-        f"Prefetching tokenizer for '{model_name}' in main process "
+        f"Prefetching tokenizer for '{model_name}' "
         f"(trust_remote_code={trust_remote_code}) …"
     )
 
-    # ── Step 1: check local cache first (zero network, instant) ─────
     try:
         tok = AutoTokenizer.from_pretrained(
-            model_name,
-            trust_remote_code=trust_remote_code,
-            local_files_only=True,
+            model_name, trust_remote_code=trust_remote_code, local_files_only=True,
         )
-        logger.info(
-            f"Tokenizer already cached locally — skipping download. "
-            f"vocab_size={tok.vocab_size}"
-        )
+        logger.info(f"Tokenizer already cached locally. vocab_size={tok.vocab_size}")
         return
     except OSError:
-        # Not in cache — fall through to download
         pass
     except Exception as e:
-        # Unexpected error on the local check — don't abort, just warn
-        logger.warning(
-            f"Unexpected error during local tokenizer check: {e}. "
-            "Will attempt download."
-        )
+        logger.warning(f"Local tokenizer check raised: {e}. Will attempt download.")
 
-    # ── Step 2: download (single process, no Ray worker contention) ──
     try:
         tok = AutoTokenizer.from_pretrained(
-            model_name,
-            trust_remote_code=trust_remote_code,
-            local_files_only=False,
+            model_name, trust_remote_code=trust_remote_code, local_files_only=False,
         )
-        logger.info(
-            f"Tokenizer downloaded and cached successfully. "
-            f"vocab_size={tok.vocab_size}"
-        )
+        logger.info(f"Tokenizer downloaded. vocab_size={tok.vocab_size}")
     except Exception as e:
-        # Non-fatal: Ray workers will still try on their own.
-        # Log clearly so the user knows what happened.
         logger.warning(
-            f"Tokenizer prefetch failed: {e}\n"
-            "Ray workers will attempt to download the tokenizer themselves. "
-            "If all workers stall at MapBatches with 0 rows, this is why — "
-            "check your network connection or HF Hub access."
+            f"Tokenizer prefetch failed: {e}. "
+            "Ray workers will retry on their own."
         )
 
 
@@ -168,10 +91,42 @@ def _prefetch_tokenizer(cfg) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+def _tokenize_one_split(cfg, dataset_name: str, split: str | None) -> str:
+    """
+    Tokenize one split and persist to disk. Returns the cache path.
+
+    The persisted cache directory is named ``<dataset><_split>_<hash>`` so
+    train and val always end up in different folders.
+    """
+    from bhaskera.data.registry import call_raw_builder, TEXT_COL
+    from bhaskera.data.tokenize import persist_tokenized
+
+    if dataset_name not in TEXT_COL:
+        raise ValueError(
+            f"No text_col registered for dataset '{dataset_name}'. "
+            "Use @register_raw('name', text_col='column_name')."
+        )
+
+    logger.info(f"Building raw dataset '{dataset_name}' (split={split!r})…")
+    raw_ds   = call_raw_builder(dataset_name, cfg, split=split)
+    text_col = TEXT_COL[dataset_name]
+
+    # Suffix the dataset_name with the split so caches don't collide.
+    persist_name = f"{dataset_name}_{split}" if split else dataset_name
+
+    cache_path = persist_tokenized(
+        ds=raw_ds,
+        cfg=cfg,
+        text_col=text_col,
+        dataset_name=persist_name,
+    )
+    return cache_path
+
+
 def main() -> None:
     args = _parse_args()
 
-    # ── Load config ─────────────────────────────────────────────────
+    # ── Load config ─────────────────────────────────────────────────────
     from bhaskera.config import load_config
     cfg = load_config(args.config)
 
@@ -184,8 +139,13 @@ def main() -> None:
         cfg.data.overwrite_cache = True
     if args.num_workers:
         cfg.data.num_workers = args.num_workers
+    if args.format:
+        cfg.data.format = args.format
+    if args.train_path:
+        cfg.data.train_path = args.train_path
+    if args.val_path:
+        cfg.data.val_path = args.val_path
 
-    # Validate that cache_dir is set
     if not cfg.data.cache_dir:
         logger.error(
             "cfg.data.cache_dir is not set. "
@@ -194,88 +154,111 @@ def main() -> None:
         sys.exit(1)
 
     dataset_name = cfg.data.name
-    logger.info(f"bhaskera-tokenize | dataset={dataset_name!r} | config={args.config!r}")
+    splits       = _resolve_splits(args.split, cfg)
 
-    # ── Prefetch tokenizer BEFORE Ray init (fix #29) ────────────────
-    # Must happen here, in the single driver process, so all subsequent
-    # Ray workers find the tokenizer already on disk.
+    logger.info(
+        f"bhaskera-tokenize | dataset={dataset_name!r} | format={cfg.data.format!r} | "
+        f"splits={splits} | config={args.config!r}"
+    )
+
+    # ── Prefetch tokenizer BEFORE Ray init (fix #29) ────────────────────
     _prefetch_tokenizer(cfg)
-    total_ram = psutil.virtual_memory().total
-    shm_free  = shutil.disk_usage("/dev/shm").total
-    object_store_memory = int(min(0.6 * total_ram, 0.8 * shm_free))
-    # ── Init Ray (no monitoring — headless tokenization job) ────────
+
+    # ── Init Ray ────────────────────────────────────────────────────────
     import ray
     ray.init(
-        num_cpus=get_available_cpus(),
+        num_cpus=os.cpu_count(),
         include_dashboard=False,
         ignore_reinit_error=True,
-        object_store_memory=object_store_memory,
     )
     logger.info("Ray initialized for tokenization.")
 
-    # ── Import dataset builders (triggers @register_raw decorators) ─
-    import bhaskera.data.datasets  # noqa: F401 — side-effect: populates RAW_REGISTRY
+    # Side-effect: populate REGISTRY / RAW_REGISTRY with all builders,
+    # including local_chat which registers the "local" dataset.
+    import bhaskera.data.datasets  # noqa: F401
 
-    from bhaskera.data.registry import RAW_REGISTRY, TEXT_COL
-    from bhaskera.data.tokenize import persist_tokenized
-
+    from bhaskera.data.registry import RAW_REGISTRY
     if dataset_name not in RAW_REGISTRY:
         logger.error(
             f"Dataset '{dataset_name}' is not registered in RAW_REGISTRY. "
-            f"Available: {sorted(RAW_REGISTRY)}. "
-            "Register it with @register_raw('name', text_col='...')."
+            f"Available: {sorted(RAW_REGISTRY)}."
         )
         ray.shutdown()
         sys.exit(1)
 
-    if dataset_name not in TEXT_COL:
-        logger.error(
-            f"No text_col registered for dataset '{dataset_name}'. "
-            "Use @register_raw('name', text_col='column_name')."
-        )
-        ray.shutdown()
-        sys.exit(1)
-
-    # ── Build raw dataset ───────────────────────────────────────────
-    logger.info(f"Loading raw dataset '{dataset_name}' from HuggingFace...")
-    raw_ds   = RAW_REGISTRY[dataset_name](cfg)
-    text_col = TEXT_COL[dataset_name]
-
-    # ── Tokenize and persist ────────────────────────────────────────
-    cache_path = persist_tokenized(
-        ds=raw_ds,
-        cfg=cfg,
-        text_col=text_col,
-        dataset_name=dataset_name,
-    )
+    # ── Tokenize each requested split ───────────────────────────────────
+    cache_paths: dict[str, str] = {}
+    for split in splits:
+        try:
+            cache_paths[split or "default"] = _tokenize_one_split(cfg, dataset_name, split)
+        except Exception as e:
+            logger.error(f"Tokenization failed for split={split!r}: {e}", exc_info=True)
+            ray.shutdown()
+            sys.exit(2)
 
     ray.shutdown()
 
-    # ── Print result banner ─────────────────────────────────────────
-    _print_result_box(cache_path, dataset_name, cfg)
+    _print_result_box(cache_paths, dataset_name, cfg)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _print_result_box(cache_path: str, dataset_name: str, cfg) -> None:
-    """Print a copy-pasteable config snippet inside a box."""
-    snippet = (
-        f"data:\n"
-        f"  name: \"{dataset_name}\"\n"
-        f"  tokenized_path: \"{cache_path}\"\n"
-        f"  seq_len: {cfg.data.seq_len}"
-    )
+def _resolve_splits(arg_split: str, cfg) -> List[str | None]:
+    """
+    Decide which splits to tokenize.
 
-    lines = [
-        "Tokenization complete!",
-        "",
-        f"Cache path: {cache_path}",
-        "",
-        "Paste this into your training config:",
-        "",
-    ] + snippet.splitlines()
+    For non-local datasets (or when split is None) we run a single pass with
+    split=None — the existing builder ignores the kwarg.
+    """
+    if arg_split == "none" or cfg.data.name not in {"local"}:
+        # Existing HF datasets: one pass, no split kwarg.
+        if arg_split in ("val", "both"):
+            logger.warning(
+                f"--split {arg_split!r} requested for non-local dataset "
+                f"'{cfg.data.name}' — running a single pass instead."
+            )
+        return [None]
+
+    if arg_split == "train":
+        return ["train"]
+    if arg_split == "val":
+        return ["val"]
+    if arg_split == "both":
+        return ["train", "val"]
+
+    # Default for "local" if --split not given: tokenize train only.
+    return ["train"]
+
+
+def _print_result_box(cache_paths: dict[str, str], dataset_name: str, cfg) -> None:
+    """Print a copy-pasteable config snippet inside a box."""
+    lines: list[str] = ["Tokenization complete!", ""]
+
+    snippet_lines = [
+        "data:",
+        f"  name: \"{dataset_name}\"",
+        f"  seq_len: {cfg.data.seq_len}",
+    ]
+    if cfg.data.format:
+        snippet_lines.append(f"  format: \"{cfg.data.format}\"")
+
+    # Map split -> YAML field
+    field_for_split = {
+        "train":   "tokenized_path",
+        "default": "tokenized_path",
+        "val":     "val_tokenized_path",
+    }
+    for split, path in cache_paths.items():
+        field = field_for_split.get(split, "tokenized_path")
+        snippet_lines.append(f"  {field}: \"{path}\"")
+
+    lines += [f"Cache path(s):"]
+    for split, path in cache_paths.items():
+        lines.append(f"  [{split}] {path}")
+    lines += ["", "Paste this into your training config:", ""]
+    lines += snippet_lines
 
     border = "═" * _BOX_WIDTH
     print(f"\n╔{border}╗")
@@ -293,26 +276,29 @@ def _parse_args() -> argparse.Namespace:
             "Subsequent runs with the same config return immediately (cache hit)."
         ),
     )
-    p.add_argument(
-        "--config", required=True,
-        help="Path to Bhaskera YAML config (model.name and data.seq_len are read from here)",
-    )
-    p.add_argument(
-        "--dataset", type=str, default=None,
-        help="Dataset name to tokenize (overrides config.data.name)",
-    )
-    p.add_argument(
-        "--storage-path", type=str, default=None,
-        help="Root directory for tokenized parquet cache (overrides config.data.cache_dir)",
-    )
-    p.add_argument(
-        "--overwrite", action="store_true",
-        help="Force re-tokenization even if a valid cache exists",
-    )
-    p.add_argument(
-        "--num-workers", type=int, default=None,
-        help="Number of Ray CPU workers for tokenization (overrides config.data.num_workers)",
-    )
+    p.add_argument("--config", required=True,
+        help="Path to Bhaskera YAML config")
+    p.add_argument("--dataset", type=str, default=None,
+        help="Dataset name to tokenize (overrides config.data.name)")
+    p.add_argument("--storage-path", type=str, default=None,
+        help="Root directory for tokenized parquet cache (overrides config.data.cache_dir)")
+    p.add_argument("--overwrite", action="store_true",
+        help="Force re-tokenization even if a valid cache exists")
+    p.add_argument("--num-workers", type=int, default=None,
+        help="Number of Ray CPU workers (overrides config.data.num_workers)")
+
+    # Phase 2 additions
+    p.add_argument("--split", type=str, default="train",
+        choices=["train", "val", "both", "none"],
+        help="Which split(s) to tokenize. 'none' disables split handling. "
+             "Only meaningful for the 'local' dataset.")
+    p.add_argument("--format", type=str, default=None,
+        help="Format renderer name: chatml | alpaca | sharegpt | <custom>. "
+             "Overrides config.data.format.")
+    p.add_argument("--train-path", type=str, default=None,
+        help="Path/dir/glob for train data (overrides config.data.train_path)")
+    p.add_argument("--val-path", type=str, default=None,
+        help="Path/dir/glob for val data (overrides config.data.val_path)")
     return p.parse_args()
 
 

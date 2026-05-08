@@ -46,10 +46,9 @@ model:
 data:
   name: "ultrachat"             # text_col=prompt, split=train_sft
   seq_len: 2048
-  num_workers: 8                # 4 GPUs across 2 nodes — 4 per node is safe
-  tokenize_batch_size: 128      # fix #27 — prevents OOM at seq_len ≥ 2048
-  tokenize_compression: "snappy"  # snappy | zstd | none
-  prefetch_batches: 2           # fix #16 — pipeline data loading with training
+  num_workers: 4                # 4 GPUs across 2 nodes — 4 per node is safe
+  tokenized_path: "/scratch/ldls-iiitd/training-framework/newchanges/ultrachat_908b384d81812c6e"
+  prefetch_batches: 4           # fix #16 — pipeline data loading with training
   local_shuffle_buffer_multiplier: 10
   pack_sequences: false         # set true to bin-pack sequences and maximize GPU utilisation
 
@@ -80,8 +79,8 @@ moe:
 # Training
 # -----------------------------------------------------------------------------
 training:
-  batch_size: 2                 # per-GPU micro-batch; MoE activations are large — keep small
-  grad_accum: 4                 # effective batch = 4 GPUs × 2 × 4 = 32 sequences/step
+  batch_size: 4                 # per-GPU micro-batch; MoE activations are large — keep small
+  grad_accum: 2                 # effective batch = 4 GPUs × 2 × 4 = 32 sequences/step
   lr: 2.0e-4                    # standard LoRA LR for this scale
   weight_decay: 0.01
   max_steps: 1000               # bump to 3000–5000 for a full UltraChat run
@@ -104,7 +103,7 @@ training:
       buffer_dtype: "bfloat16"
       activation_checkpointing: true       # REQUIRED — MoE backward holds all expert activations
       cpu_offload: false                   # set true if you OOM on 2× 24 GB
-      shard_experts_individually: true     # shard each MoE expert as its own FSDP unit
+      shard_experts_individually: false    # shard each MoE expert as its own FSDP unit
 
     ddp:
       find_unused_parameters: false

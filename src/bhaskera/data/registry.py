@@ -11,12 +11,17 @@ Phase 1 changes:
   fix #10 — build_ray_dataset now accepts world_size so partitioning is
             world-size-aware.
 
+Phase 2 (chat-format) addition:
+  call_raw_builder(name, cfg, split=None) — calls a raw builder, forwarding
+  ``split`` only if the builder declares a ``split`` parameter. Existing
+  builders (ultrachat, openassistant, redpajama) need no changes.
+
 Adding a new dataset:
 
     from bhaskera.data.registry import register, register_raw
 
     @register_raw("my_dataset", text_col="text")
-    def _build_raw(cfg) -> ray.data.Dataset:
+    def _build_raw(cfg, split=None) -> ray.data.Dataset:   # split is optional
         ...
         return ray.data.Dataset   # raw (not tokenized)
 
@@ -27,8 +32,9 @@ Adding a new dataset:
 """
 from __future__ import annotations
 
+import inspect
 import logging
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
 import ray.data
 
@@ -73,6 +79,9 @@ def register_raw(name: str, text_col: str):
         @register_raw("my_dataset", text_col="prompt")
         def _build_raw(cfg) -> ray.data.Dataset:
             ...
+
+    The builder may also take an optional ``split`` kwarg if it cares about
+    train/val. The launcher passes split through ``call_raw_builder``.
     """
     def _wrap(fn: Callable) -> Callable:
         if name in RAW_REGISTRY:
@@ -86,6 +95,33 @@ def register_raw(name: str, text_col: str):
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+def call_raw_builder(name: str, cfg, split: Optional[str] = None) -> ray.data.Dataset:
+    """
+    Call a raw builder, forwarding ``split`` only if it accepts that kwarg.
+
+    This keeps existing builders (which don't know about splits) working
+    unchanged, while letting new local builders separate train/val cleanly.
+    """
+    if name not in RAW_REGISTRY:
+        raise ValueError(
+            f"Dataset '{name}' is not registered in RAW_REGISTRY. "
+            f"Available: {sorted(RAW_REGISTRY)}."
+        )
+    fn = RAW_REGISTRY[name]
+    sig = inspect.signature(fn)
+    kwargs = {}
+    if split is not None and "split" in sig.parameters:
+        kwargs["split"] = split
+    elif split is not None and split != "train":
+        # Builder ignores split, but caller asked for something other than
+        # train — warn so the user notices their val_path won't be used.
+        logger.warning(
+            f"Builder '{name}' does not accept a 'split' argument; "
+            f"ignoring split={split!r}."
+        )
+    return fn(cfg, **kwargs)
+
 
 def build_ray_dataset(cfg, world_size: int = 1) -> ray.data.Dataset:
     """
