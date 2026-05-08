@@ -18,6 +18,16 @@ set -euo pipefail
 
 mkdir -p logs outputs
 
+# ----------------------------------------------------------------------------
+# Activate project environment (match scripts/submit.sh)
+# ----------------------------------------------------------------------------
+if [ -n "${SLURM_SUBMIT_DIR:-}" ] && [ -f "${SLURM_SUBMIT_DIR}/bhaskera-activate.sh" ]; then
+  # shellcheck source=/dev/null
+  source "${SLURM_SUBMIT_DIR}/bhaskera-activate.sh"
+fi
+
+export PYTHONPATH="${SLURM_SUBMIT_DIR}/src:${PYTHONPATH:-}"
+
 # This script forwards all provided arguments to the Bhaskera inference CLI
 # Example: sbatch scripts/inference.slurm --config cfg.yaml --output-file out.txt --prompt "..."
 
