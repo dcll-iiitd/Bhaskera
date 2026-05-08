@@ -17,3 +17,5 @@ env/
 
 # Misc
 *.log
+*.err
+*.out
