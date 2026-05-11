@@ -67,3 +67,19 @@ logging:
   project: "bhaskera"
   run_name: "param2-lora"
   log_gpu_every_n_steps: 10
+
+inference:
+  max_new_tokens: 512
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 50
+  do_sample: true
+  batch_size: 1
+  device: auto
+  kv_cache: turboquant
+
+  turboquant:
+    key_bits: 4
+    value_bits: 2
+    residual_window: 128
+    protected_layers: 2

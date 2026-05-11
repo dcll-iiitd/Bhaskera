@@ -162,13 +162,26 @@ class _HFBackend:
 
         # ── Model ────────────────────────────────────────────────────
         model_kwargs: dict = dict(
-            torch_dtype=self._dtype or "auto",
+            dtype=self._dtype or "auto",
             trust_remote_code=cfg.model.trust_remote_code,
         )
-        # Multi-GPU: device_map=auto lets HF shard across all visible GPUs
-        if device.type == "cuda" and torch.cuda.device_count() > 1:
-            model_kwargs["device_map"] = "auto"
-            logger.info(f"[Engine] Multi-GPU detected ({torch.cuda.device_count()} GPUs), using device_map=auto")
+        
+        visible = torch.cuda.device_count()
+        if device.type == "cuda" and visible > 1:
+            # Only use multi-GPU if model genuinely doesn't fit on one card
+            single_vram = torch.cuda.get_device_properties(0).total_memory / 1e9
+            if single_vram >= 38.0:   # 34GB model + ~4GB headroom
+                logger.info(
+                    f"[Engine] Single GPU sufficient ({single_vram:.0f}GB available), "
+                    f"pinning to cuda:0 for lower latency"
+                )
+                model_kwargs["device_map"] = "cuda:0"
+            else:
+                model_kwargs["device_map"] = "auto"
+                logger.info(
+                    f"[Engine] Multi-GPU needed: single={single_vram:.0f}GB < 38GB, "
+                    f"using device_map=auto across {visible} GPUs"
+                )
         else:
             model_kwargs["device_map"] = str(device)
 
@@ -333,12 +346,18 @@ class _HFBackend:
 
         # Param2: use model's internal cache — custom Cache object causes
         # degenerate repetition due to incompatibility with param2moe forward.
-        if self._kv_cache is not None:
-            if getattr(self, "_is_param2", False):
+        if self._kv_cache is not None and not getattr(self, "_is_param2", False):
+            gen_kwargs["past_key_values"] = self._kv_cache
+        elif getattr(self, "_is_param2", False):
+            # Use HF DynamicCache — compatible with param2moe custom forward,
+            # avoids the degenerate repetition caused by our custom Cache subclass.
+            # This restores O(1) per-step attention vs the prior O(n²) recomputation.
+            try:
                 from transformers import DynamicCache
                 gen_kwargs["past_key_values"] = DynamicCache()
-            else:
-                gen_kwargs["past_key_values"] = self._kv_cache
+                logger.info("[Engine] Param2: using DynamicCache for KV reuse")
+            except ImportError:
+                logger.warning("[Engine] DynamicCache unavailable — running without KV cache")
 
         # Use CUDA autocast for AMP
         ctx = (
