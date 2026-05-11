@@ -353,18 +353,15 @@ class _HFBackend:
 
         # Param2: use model's internal cache — custom Cache object causes
         # degenerate repetition due to incompatibility with param2moe forward.
-        if self._kv_cache is not None and not getattr(self, "_is_param2", False):
+        # Use custom KV cache if specified, otherwise default to HF DynamicCache
+        if self._kv_cache is not None:
             gen_kwargs["past_key_values"] = self._kv_cache
-        elif getattr(self, "_is_param2", False):
-            # Param2 has tiny KV (8 KV heads × 64 dim × 21 layers).
-            # At 2000 tokens that's ~86MB — TurboQuant compression overhead
-            # costs more than it saves. DynamicCache is optimal here.
+        else:
             try:
                 from transformers import DynamicCache
                 gen_kwargs["past_key_values"] = DynamicCache()
-                logger.info("[Engine] Param2: DynamicCache (KV too small to benefit from TurboQuant)")
             except ImportError:
-                logger.warning("[Engine] DynamicCache unavailable — running without KV cache")
+                pass
 
         # Use CUDA autocast for AMP
         ctx = (
@@ -428,9 +425,6 @@ class _HFBackend:
 
     def kv_cache_stats(self) -> Optional[dict]:
         if self._kv_cache is None:
-            return None
-        # Param2 bypasses our custom cache — nothing was written to it
-        if getattr(self, "_is_param2", False):
             return None
         if hasattr(self._kv_cache, "compression_stats"):
             return self._kv_cache.compression_stats()

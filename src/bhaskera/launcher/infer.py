@@ -329,11 +329,7 @@ def main(argv: List[str] = None) -> None:
             f"ratio: {stats['compression_ratio']:.1f}×)"
         )
     elif infer.kv_cache == "turboquant":
-        is_param2 = getattr(engine._backend, "_is_param2", False) if engine._loaded else False
-        if is_param2:
-            print("KV cache: DynamicCache (Param2 — TurboQuant bypassed, KV too small to benefit)")
-        else:
-            print("TurboQuant: configured but stats unavailable")
+        print("TurboQuant: configured but stats unavailable")
 
     # Thinking model note
     if is_thinking and not args.show_thinking:
