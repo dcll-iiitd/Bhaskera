@@ -14,19 +14,36 @@ DTYPE NOTE (important — do not remove the cast below):
         but got {torch.float32, torch.bfloat16}
 
     So we cast LoRA params (the only trainable ones) to match the base
-    dtype at apply time.  This is the same pattern HF Trainer and PEFT's
-    own FSDP examples use.
+    dtype at apply time **under FSDP only**.  This is the same pattern
+    HF Trainer and PEFT's own FSDP examples use.
 
-    Trade-off: AdamW moments for LoRA are stored in bf16 instead of fp32,
-    which is slightly noisier.  In practice this is fine for LoRA SFT —
-    the loss of precision is small and `reduce_dtype=float32` in the FSDP
-    MixedPrecisionPolicy keeps gradient reductions in fp32.
+    Trade-off (FSDP path): AdamW moments for LoRA are stored in bf16
+    instead of fp32, which is slightly noisier.  In practice this is
+    fine for LoRA SFT — the loss of precision is small and
+    `reduce_dtype=float32` in the FSDP MixedPrecisionPolicy keeps
+    gradient reductions in fp32.
 
-    If you need true fp32 master weights for LoRA, load the BASE model in
-    fp32 instead (set `model.dtype: float32` in your config) and let
+    If you need true fp32 master weights for LoRA, load the BASE model
+    in fp32 instead (set `model.dtype: float32` in your config) and let
     MixedPrecisionPolicy(param_dtype=bf16) cast at forward time.  That
     costs ~2x the base-param memory but everything is uniform fp32 at
     shard-init so no manual cast is needed.
+
+DDP-parity fix (this revision):
+    DDP has no dtype-uniformity requirement, and casting LoRA params
+    to bf16 under DDP is actively harmful:
+
+      * AdamW state (exp_avg, exp_avg_sq) is allocated to match the
+        param dtype. With params in bf16 and β₂=0.95, the second-moment
+        update `v ← β₂·v + (1-β₂)·g²` quantises most LoRA gradients to
+        zero at typical LRs (~2e-4), starving the optimiser.
+      * The DDP forward already uses torch.autocast (see trainer/loop.py
+        line ~9893), which expects fp32 master weights and casts to bf16
+        inside the forward. Pre-casting defeats this design.
+
+    So under DDP we keep LoRA params in PEFT's default fp32. Works for
+    both dense and MoE — the dtype concern is purely an FSDP shard-init
+    constraint.
 """
 from __future__ import annotations
 
@@ -89,19 +106,33 @@ def apply_lora(model: nn.Module, cfg, profile: ModelProfile) -> nn.Module:
     lora_cfg = PeftLoraConfig(**peft_kwargs)
     model = get_peft_model(model, lora_cfg)
 
-    # ── Cast LoRA (trainable) params to match base dtype ────────────
-    # REQUIRED for FSDP2 (see module docstring).  We only touch trainable
-    # params — frozen base weights already have the right dtype.
-    target_dtype = profile.model_dtype
-    cast_count = 0
-    for pname, param in model.named_parameters():
-        if param.requires_grad and param.dtype != target_dtype:
-            param.data = param.data.to(target_dtype)
-            cast_count += 1
-    if cast_count:
+    # ── Strategy-gated LoRA dtype cast ──────────────────────────────
+    # FSDP2 path: cast LoRA (the only trainable) params to base dtype
+    # to satisfy uniform-dtype shard-init.
+    # DDP / single-GPU path: keep PEFT's fp32 default for clean AdamW
+    # master weights and autocast compatibility.
+    strategy = cfg.training.distributed.strategy.lower()
+    if strategy == "fsdp":
+        target_dtype = profile.model_dtype
+        cast_count = 0
+        for pname, param in model.named_parameters():
+            if param.requires_grad and param.dtype != target_dtype:
+                param.data = param.data.to(target_dtype)
+                cast_count += 1
+        if cast_count:
+            logger.info(
+                f"FSDP: cast {cast_count} LoRA parameter tensors to {target_dtype} "
+                "(FSDP2 requires uniform param dtype within a shard group)"
+            )
+    else:
+        # Verify and report: PEFT should have left A/B in fp32.
+        fp32_count = sum(
+            1 for _, p in model.named_parameters()
+            if p.requires_grad and p.dtype == torch.float32
+        )
         logger.info(
-            f"Cast {cast_count} LoRA parameter tensors to {target_dtype} "
-            "(FSDP2 requires uniform param dtype within a shard group)"
+            f"{strategy.upper()}: keeping {fp32_count} LoRA parameter tensors in fp32 "
+            "(autocast handles forward-time bf16; AdamW master weights stay fp32)"
         )
 
     # ── Freeze router / gate weights (critical for MoE stability) ───

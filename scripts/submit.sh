@@ -15,7 +15,7 @@
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
 #SBATCH --partition=gpu
-#SBATCH --time=04:00:00
+#SBATCH --time=16:00:00
 #SBATCH --output=logs/bhaskera_%j_%N.out
 #SBATCH --error=logs/bhaskera_%j_%N.err
 
@@ -127,7 +127,8 @@ srun --nodes="$SLURM_JOB_NUM_NODES" --ntasks="$SLURM_JOB_NUM_NODES" \
         --min-nodes "$SLURM_JOB_NUM_NODES" \
         --num-cpus="$SLURM_CPUS_PER_TASK" \
         --num-gpus="$NUM_GPUS" \
-        -- \
+        --metrics-export-port=8080 \
+	--\
         python -m bhaskera.launcher.train \
             --config "${SLURM_SUBMIT_DIR}/configs/config.yaml" \
             --num-workers "$WORKER_COUNT" \

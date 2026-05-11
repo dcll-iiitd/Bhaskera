@@ -6,6 +6,25 @@ LoRA targets, dtype, aux-loss support — by walking the module tree once.
 
 Returns a ModelProfile consumed by models/, distributed/, and trainer/.
 Zero hardcoded class names. Works for any HuggingFace CausalLM.
+
+Router-detection fix (this revision):
+    Previously routers were identified by substring matching against
+    {"gate", "router", "switch", "gating"} on every nn.Module leaf name.
+    The substring "gate" matches "gate_proj" → every SwiGLU model
+    (Llama, Mistral, Qwen, Gemma, etc.) had its gate_proj mis-flagged
+    as an MoE router and excluded from LoRA targets.
+
+    The fix is structural: a real MoE router is always a parameter-bearing
+    sibling of an `experts` ModuleList. We find the parents of expert
+    containers first, then only look for routers inside those parents.
+    SwiGLU's gate_proj is a sibling of up_proj/down_proj — never a sibling
+    of an experts container — so it's correctly classified as a regular
+    projection.
+
+    Works generically for any architecture: dense models get no routers
+    detected (correct), MoE models get exactly their gate/router modules
+    detected (correct), and LoRA target auto-discovery picks up all
+    non-router nn.Linear leaves in the decoder layer.
 """
 from __future__ import annotations
 
@@ -222,61 +241,119 @@ def _find_decoder_layer_cls(model: nn.Module, expected_count: int) -> Optional[t
 # ──────────────────────────────────────────────────────────────────────
 # Structural detection — MoE experts and routers
 # ──────────────────────────────────────────────────────────────────────
+#
+# Design (this revision):
+#   1. Walk the tree once collecting all parameter-bearing leaf modules
+#      whose leaf name signals "experts container" (an nn.ModuleList).
+#   2. Record the dotted parent path of each experts container.
+#   3. ONLY inside those parent paths, look for parameter-bearing modules
+#      whose leaf name signals "router/gate". This guarantees we never
+#      match SwiGLU's gate_proj (its parent is the MLP block, not an MoE
+#      expert container).
+#   4. Handle shared experts as a separate, structural pass.
+#
+# The result generalises:
+#   * Dense models (Llama, Mistral, Qwen, Gemma, Phi, ...): no expert
+#     containers → no routers detected → gate_proj/up_proj/down_proj all
+#     reach LoRA targets correctly.
+#   * MoE models (Mixtral, Qwen2-MoE, DeepSeek-MoE, Param2, ...): every
+#     experts ModuleList found → its sibling gate/router/switch/gating
+#     module detected → router excluded from LoRA targets.
+# ──────────────────────────────────────────────────────────────────────
 
-_EXPERT_KEYWORDS = {"experts", "local_experts", "routed_experts"}
-_ROUTER_KEYWORDS = {"gate", "router", "switch", "gating"}
+_EXPERT_LEAF_NAMES = {"experts", "local_experts", "routed_experts"}
+_SHARED_EXPERT_HINTS = ("shared_expert", "shared_experts")
+_ROUTER_LEAF_HINTS = ("gate", "router", "switch", "gating")
+# Names ending in these are projections, never routers — even if their
+# leaf name happens to contain a router keyword as a substring.
+_PROJECTION_SUFFIXES = ("_proj", "_projection", "_linear", "_in", "_out")
+
+
+def _looks_like_projection(leaf_name_lower: str) -> bool:
+    """A leaf name like 'gate_proj' is a projection, not a router."""
+    return any(leaf_name_lower.endswith(s) for s in _PROJECTION_SUFFIXES)
+
+
+def _looks_like_router(leaf_name_lower: str) -> bool:
+    """True iff leaf_name suggests a router/gate AND isn't a projection."""
+    if _looks_like_projection(leaf_name_lower):
+        return False
+    return any(hint in leaf_name_lower for hint in _ROUTER_LEAF_HINTS)
 
 
 def _find_moe_components(
     model: nn.Module,
 ) -> tuple[Optional[type], list[nn.Module], list[str]]:
     """
-    Walk the model tree looking for expert modules and router/gate modules.
+    Walk the model tree structurally to identify expert modules and
+    their associated router/gate modules.
 
     Returns:
         expert_cls:      type of individual expert (or None)
         expert_modules:  flat list of all expert nn.Module instances
-        router_names:    list of full names for gate/router modules
+        router_names:    list of full dotted names of router/gate modules
+                         (only those sitting next to an experts container)
     """
     expert_cls: Optional[type] = None
     expert_modules: list[nn.Module] = []
-    router_names: list[str] = []
 
+    # Step 1 — find every expert container and remember its parent path.
+    expert_parent_paths: set[str] = set()
     for name, module in model.named_modules():
-        name_lower = name.split(".")[-1].lower()
-
-        # Detect expert containers (nn.ModuleList named "experts" etc.)
-        if name_lower in _EXPERT_KEYWORDS and isinstance(module, nn.ModuleList):
+        leaf = name.split(".")[-1].lower() if name else ""
+        if leaf in _EXPERT_LEAF_NAMES and isinstance(module, nn.ModuleList):
             children = list(module.children())
             if len(children) >= 2:
                 cls = type(children[0])
                 if expert_cls is None:
                     expert_cls = cls
                 expert_modules.extend(children)
+                # Parent path: everything before the leaf
+                parent = ".".join(name.split(".")[:-1])
+                expert_parent_paths.add(parent)
 
-        # Detect routers / gates
-        if any(kw in name_lower for kw in _ROUTER_KEYWORDS):
-            # Only count actual parameter-bearing modules, not containers
-            if list(module.parameters()):
-                router_names.append(name)
-
-    # Deduplicate shared experts if they're also in the experts list
-    # (some architectures put shared experts separately)
+    # Step 2 — find shared-expert blocks (structurally, by name hint).
+    # These are siblings of (or in lieu of) the main experts container,
+    # so we treat their parent the same way for router detection.
     for name, module in model.named_modules():
-        name_lower = name.split(".")[-1].lower()
-        if "shared" in name_lower and "expert" in name_lower:
+        leaf = name.split(".")[-1].lower() if name else ""
+        if any(hint in leaf for hint in _SHARED_EXPERT_HINTS):
             if isinstance(module, nn.ModuleList):
                 for child in module.children():
                     if child not in expert_modules:
                         expert_modules.append(child)
+                parent = ".".join(name.split(".")[:-1])
+                expert_parent_paths.add(parent)
             elif list(module.parameters()) and module not in expert_modules:
+                # A single-module shared expert
                 expert_modules.append(module)
+                parent = ".".join(name.split(".")[:-1])
+                expert_parent_paths.add(parent)
+
+    # Step 3 — router detection, scoped to expert_parent_paths only.
+    # This is the key change: only modules whose parent is the parent of
+    # an experts container can be routers. SwiGLU's gate_proj has the MLP
+    # block as its parent, not an MoE block, so it's correctly excluded.
+    router_names: list[str] = []
+    if expert_parent_paths:
+        for name, module in model.named_modules():
+            if not name:
+                continue
+            parent = ".".join(name.split(".")[:-1])
+            if parent not in expert_parent_paths:
+                continue
+            leaf = name.split(".")[-1].lower()
+            if not _looks_like_router(leaf):
+                continue
+            if list(module.parameters()):
+                router_names.append(name)
 
     if expert_modules:
         logger.info(
             f"MoE detected: {len(expert_modules)} expert modules, "
             f"expert class={expert_cls.__name__ if expert_cls else 'N/A'}, "
-            f"{len(router_names)} router modules"
+            f"{len(router_names)} router modules, "
+            f"{len(expert_parent_paths)} expert-block parents"
         )
 
     return expert_cls, expert_modules, router_names
@@ -302,6 +379,7 @@ def _detect_aux_loss(config) -> bool:
         return True
     return False
 
+
 def _detect_aux_loss_attr(config) -> str:
     """Determine how the model exposes auxiliary loss."""
     # Most HF MoE models put it in output.aux_loss when output_router_logits=True
@@ -324,8 +402,11 @@ def _find_lora_targets(
 ) -> list[str]:
     """
     Inspect one decoder layer to find all nn.Linear module names.
-    Excludes router/gate modules.
-    Returns short names like ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', ...].
+    Excludes router/gate modules (identified STRUCTURALLY via router_names,
+    not via fragile substring matching against the leaf name).
+
+    Returns short names like ['q_proj', 'k_proj', 'v_proj', 'o_proj',
+    'gate_proj', 'up_proj', 'down_proj'].
     """
     if decoder_cls is None:
         return []
@@ -339,22 +420,23 @@ def _find_lora_targets(
     if sample_layer is None:
         return []
 
-    # Collect router keywords from full paths (just the last segment)
-    router_short = set()
+    # Build set of leaf names that are routers (precise structural list
+    # from _find_moe_components — for dense models this is empty).
+    router_leaf_names: set[str] = set()
     for rn in router_names:
-        parts = rn.split(".")
-        router_short.update(parts)
+        if rn:
+            router_leaf_names.add(rn.split(".")[-1])
 
-    targets = set()
+    targets: set[str] = set()
     for name, mod in sample_layer.named_modules():
-        if isinstance(mod, nn.Linear):
-            short_name = name.split(".")[-1]
-            # Skip router / gate linear layers
-            if any(kw in short_name.lower() for kw in _ROUTER_KEYWORDS):
-                continue
-            if short_name in router_short:
-                continue
-            targets.add(short_name)
+        if not isinstance(mod, nn.Linear):
+            continue
+        short_name = name.split(".")[-1]
+        # ONLY excludes leaf names that the structural router pass
+        # explicitly identified. No fragile substring matching here.
+        if short_name in router_leaf_names:
+            continue
+        targets.add(short_name)
 
     result = sorted(targets)
     logger.info(f"Auto-detected LoRA targets: {result}")

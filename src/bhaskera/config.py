@@ -18,6 +18,12 @@ Phase 1 changes:
     tokenize_batch_size, tokenize_compression, prefetch_batches,
     local_shuffle_buffer_multiplier, pack_sequences.
 
+DDP-parity fix (this revision):
+  * ``DDPConfig`` now carries ``activation_checkpointing`` and
+    ``static_graph`` so the DDP path can apply AC and opt in to
+    static-graph optimisation, mirroring the FSDP feature set.
+    Previously AC was an FSDP-only knob, which silently OOM'd DDP runs.
+
 The ``tracker`` field type is widened to ``Optional[Any]`` because
 YAML can deliver either a string, a list, or null and we want to
 defer validation to the loggers package (where the error message is
@@ -101,7 +107,7 @@ class DataConfig:
     name: str = "ultrachat"
     seq_len: int = 2048
     num_workers: int = 4
- 
+
     # ── Phase 1: persistent-cache plumbing ─────────────────────────────────
     tokenized_path: Optional[str] = None
     cache_dir: Optional[str] = None
@@ -111,7 +117,7 @@ class DataConfig:
     prefetch_batches: int = 2
     local_shuffle_buffer_multiplier: int = 10
     pack_sequences: bool = False
- 
+
     # ── Phase 2: chat-format / local-files plumbing ────────────────────────
     # Name of a registered format renderer (chatml, alpaca, sharegpt, or
     # whatever you @register_format yourself). When set, TokenizerActor
@@ -120,13 +126,13 @@ class DataConfig:
     # Free-form dict passed to the renderer. Hashed into the cache key,
     # so changing it triggers a re-tokenize automatically.
     format_options: dict = field(default_factory=dict)
- 
+
     # Local data sources (used by the "local" dataset and the tokenize CLI).
     # Each may be a single file, a directory, or a glob pattern.
     path: Optional[str] = None        # single-source shorthand (used as train)
     train_path: Optional[str] = None
     val_path: Optional[str] = None
- 
+
     # Optional pre-tokenized validation set, populated by bhaskera-tokenize
     # when run with --split both. Loaded by the trainer alongside
     # tokenized_path. (Wire this into your training loop where it makes
@@ -152,6 +158,24 @@ class DDPConfig:
     find_unused_parameters: bool = False
     gradient_as_bucket_view: bool = True
     broadcast_buffers: bool = False
+
+    # ── DDP-parity additions ───────────────────────────────────────────────
+    # Activation checkpointing under DDP. Identical mechanism to FSDP's AC
+    # (same activation_ckpt.apply_activation_checkpointing call), but applied
+    # to the raw module BEFORE the DDP wrap so DDP's parameter-graph snapshot
+    # sees the checkpoint-wrapped modules.
+    # Works for both dense (decoder-layer granularity) and MoE
+    # (per-expert granularity), driven off the ModelProfile from
+    # introspect.py — no hardcoded layer names.
+    activation_checkpointing: bool = False
+
+    # DDP static_graph optimisation. When True, DDP caches the autograd
+    # reduction order from iteration 1 and reuses it, enabling extra
+    # bucketing optimisations. NOTE: mutually exclusive with
+    # find_unused_parameters=True (DDP itself enforces this) and with
+    # manual grad-sync toggling for grad accumulation. The training loop
+    # detects static_graph and falls back to per-micro-step all-reduces.
+    static_graph: bool = False
 
 
 @dataclass
@@ -317,7 +341,7 @@ def _dict_to_config(raw: dict) -> Config:
             name=data_raw.get("name", "ultrachat"),
             seq_len=int(data_raw.get("seq_len", 2048)),
             num_workers=int(data_raw.get("num_workers", 4)),
- 
+
             # Phase 1
             tokenized_path=data_raw.get("tokenized_path"),
             cache_dir=data_raw.get("cache_dir"),
@@ -329,7 +353,7 @@ def _dict_to_config(raw: dict) -> Config:
                 data_raw.get("local_shuffle_buffer_multiplier", 10)
             ),
             pack_sequences=bool(data_raw.get("pack_sequences", False)),
- 
+
             # Phase 2
             format=data_raw.get("format"),
             format_options=dict(data_raw.get("format_options", {}) or {}),
@@ -386,6 +410,9 @@ def _dict_to_config(raw: dict) -> Config:
                     find_unused_parameters=bool(ddp_raw.get("find_unused_parameters", False)),
                     gradient_as_bucket_view=bool(ddp_raw.get("gradient_as_bucket_view", True)),
                     broadcast_buffers=bool(ddp_raw.get("broadcast_buffers", False)),
+                    # ── DDP-parity additions ──
+                    activation_checkpointing=bool(ddp_raw.get("activation_checkpointing", False)),
+                    static_graph=bool(ddp_raw.get("static_graph", False)),
                 ),
             ),
         ),

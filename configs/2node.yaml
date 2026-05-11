@@ -36,9 +36,9 @@
 model:
   name: "bharatgenai/Param2-17B-A2.4B-Thinking"
   dtype: "bfloat16"
-  attn_impl: null               # set "flash_attention_2" if flash-attn is installed (~20% faster)
+  attn_impl: "flash_attention_2"             # set "flash_attention_2" if flash-attn is installed (~20% faster)
   trust_remote_code: true       # REQUIRED — Param2 uses custom tokenizer/modeling code
-  use_liger_kernel: true        # Triton-fused RMSNorm/RoPE/SwiGLU — safe no-op if unsupported
+  use_liger_kernel: false        # Triton-fused RMSNorm/RoPE/SwiGLU — safe no-op if unsupported
 
 # -----------------------------------------------------------------------------
 # Data — UltraChat 200k (HuggingFaceH4/ultrachat_200k)
@@ -80,11 +80,11 @@ moe:
 # -----------------------------------------------------------------------------
 training:
   batch_size: 4                 # per-GPU micro-batch; MoE activations are large — keep small
-  grad_accum: 2                 # effective batch = 4 GPUs × 2 × 4 = 32 sequences/step
+  grad_accum: 4                 # effective batch = 4 GPUs × 2 × 4 = 32 sequences/step
   lr: 2.0e-4                    # standard LoRA LR for this scale
   weight_decay: 0.01
-  max_steps: 1000               # bump to 3000–5000 for a full UltraChat run
-  num_epochs: 1
+  max_steps: 4000               # bump to 3000–5000 for a full UltraChat run
+  num_epochs: 4
   warmup_steps: 100
   max_grad_norm: 1.0
   grad_clip: 1.0                # Phase 1: used by the no_sync gradient accumulation loop
