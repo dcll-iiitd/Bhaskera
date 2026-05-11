@@ -25,7 +25,7 @@
 model:
   name: bharatgenai/Param2-17B-A2.4B-Thinking
   dtype: bfloat16
-  attn_impl: null               # flash_attention_2 if installed gives ~20% speedup
+  attn_impl: flash_attention_2               # flash_attention_2 if installed gives ~20% speedup
   trust_remote_code: true       # REQUIRED — custom param2moe modeling code
 
 inference:

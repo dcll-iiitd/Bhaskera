@@ -333,8 +333,12 @@ class _HFBackend:
 
         # Param2: use model's internal cache — custom Cache object causes
         # degenerate repetition due to incompatibility with param2moe forward.
-        if self._kv_cache is not None and not getattr(self, "_is_param2", False):
-            gen_kwargs["past_key_values"] = self._kv_cache
+        if self._kv_cache is not None:
+            if getattr(self, "_is_param2", False):
+                from transformers import DynamicCache
+                gen_kwargs["past_key_values"] = DynamicCache()
+            else:
+                gen_kwargs["past_key_values"] = self._kv_cache
 
         # Use CUDA autocast for AMP
         ctx = (
