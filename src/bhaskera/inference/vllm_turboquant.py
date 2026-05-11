@@ -551,13 +551,15 @@ class _VLLMTurboQuantBackend:
         tq_native = _check_native_turboquant_support()
 
         vllm_kwargs: dict = dict(
-            model                 = model_name,
-            dtype                 = dtype_str,
-            tensor_parallel_size  = n_gpus,
-            trust_remote_code     = cfg.model.trust_remote_code,
-            max_model_len         = getattr(infer_cfg, "max_new_tokens", 512) + 4096,
-            gpu_memory_utilization = 0.90,
+            model                  = model_name,
+            dtype                  = dtype_str,
+            tensor_parallel_size   = n_gpus,
+            trust_remote_code      = cfg.model.trust_remote_code,
+            max_model_len          = 4096,
+            gpu_memory_utilization = 0.95,
             enable_chunked_prefill = True,
+            enforce_eager          = False,
+            enable_prefix_caching  = True,
         )
 
         if use_ray:
