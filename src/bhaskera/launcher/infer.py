@@ -273,8 +273,23 @@ def main(argv: List[str] = None) -> None:
     elapsed = time.perf_counter() - t0
 
     # ── Count tokens ──────────────────────────────────────────────────
-    total_output_tokens = sum(_count_output_tokens(o, _tokenizer) for o in outputs)
-    tokens_per_second   = total_output_tokens / elapsed if elapsed > 0 else 0.0
+    total_output_tokens = 0
+    thinking_tokens = 0
+    answer_tokens = 0
+
+    for o in outputs:
+        import re
+        think_match = re.search(r"<think>(.*?)</think>", o, re.DOTALL)
+        if think_match:
+            think_text = think_match.group(1)
+            thinking_tokens += _count_output_tokens(think_text, _tokenizer)
+        # Answer = everything outside think blocks
+        answer_text = re.sub(r"<think>.*?</think>", "", o, flags=re.DOTALL).strip()
+        answer_tokens += _count_output_tokens(answer_text, _tokenizer)
+        total_output_tokens += _count_output_tokens(o, _tokenizer)
+
+    tokens_per_second = total_output_tokens / elapsed if elapsed > 0 else 0.0
+    answer_tps = answer_tokens / elapsed if elapsed > 0 else 0.0
 
     # ── Print results ──────────────────────────────────────────────────
     raw_outputs = []
@@ -289,12 +304,21 @@ def main(argv: List[str] = None) -> None:
 
     # ── Stats block ────────────────────────────────────────────────────
     print(f"\n{SEP}")
-    print(
-        f"Generated {len(prompts)} response(s) | "
-        f"{total_output_tokens} tokens | "
-        f"{elapsed:.2f}s | "
-        f"\033[1;32m{tokens_per_second:.1f} tok/s\033[0m"
-    )
+    if thinking_tokens > 0:
+        print(
+            f"Generated {len(prompts)} response(s) | "
+            f"{answer_tokens} answer tokens + {thinking_tokens} thinking tokens | "
+            f"{elapsed:.2f}s | "
+            f"\033[1;32m{answer_tps:.1f} answer tok/s\033[0m "
+            f"({tokens_per_second:.1f} total tok/s)"
+        )
+    else:
+        print(
+            f"Generated {len(prompts)} response(s) | "
+            f"{total_output_tokens} tokens | "
+            f"{elapsed:.2f}s | "
+            f"\033[1;32m{tokens_per_second:.1f} tok/s\033[0m"
+        )
 
     # KV cache stats (TurboQuant)
     stats = engine.kv_cache_stats()

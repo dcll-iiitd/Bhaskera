@@ -143,6 +143,12 @@ class _HFBackend:
     def __init__(self, model_name: str, cfg, device: torch.device):
         from transformers import AutoModelForCausalLM, AutoTokenizer
         from bhaskera.introspect import introspect_model
+        import warnings
+        warnings.filterwarnings(
+            "ignore",
+            message=".*torch_dtype.*deprecated.*",
+            category=FutureWarning,
+        )
 
         logger.info(f"[Engine] HF backend, loading: {model_name}")
         t0 = time.time()
@@ -349,15 +355,18 @@ class _HFBackend:
         if self._kv_cache is not None and not getattr(self, "_is_param2", False):
             gen_kwargs["past_key_values"] = self._kv_cache
         elif getattr(self, "_is_param2", False):
-            # Use HF DynamicCache — compatible with param2moe custom forward,
-            # avoids the degenerate repetition caused by our custom Cache subclass.
-            # This restores O(1) per-step attention vs the prior O(n²) recomputation.
-            try:
-                from transformers import DynamicCache
-                gen_kwargs["past_key_values"] = DynamicCache()
-                logger.info("[Engine] Param2: using DynamicCache for KV reuse")
-            except ImportError:
-                logger.warning("[Engine] DynamicCache unavailable — running without KV cache")
+            if self._kv_cache is not None:
+                # Wrap TurboQuantKVCache in a param2-compatible interface
+                from bhaskera.inference.kv_cache import Param2TurboQuantCache
+                gen_kwargs["past_key_values"] = Param2TurboQuantCache(self._kv_cache)
+                logger.info("[Engine] Param2: using Param2TurboQuantCache (TurboQuant + DynamicCache interface)")
+            else:
+                try:
+                    from transformers import DynamicCache
+                    gen_kwargs["past_key_values"] = DynamicCache()
+                    logger.info("[Engine] Param2: using DynamicCache for KV reuse (no TurboQuant)")
+                except ImportError:
+                    logger.warning("[Engine] DynamicCache unavailable — running without KV cache")
 
         # Use CUDA autocast for AMP
         ctx = (
