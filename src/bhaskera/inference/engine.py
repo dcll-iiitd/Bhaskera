@@ -143,12 +143,6 @@ class _HFBackend:
     def __init__(self, model_name: str, cfg, device: torch.device):
         from transformers import AutoModelForCausalLM, AutoTokenizer
         from bhaskera.introspect import introspect_model
-        import warnings
-        warnings.filterwarnings(
-            "ignore",
-            message=".*torch_dtype.*deprecated.*",
-            category=FutureWarning,
-        )
 
         logger.info(f"[Engine] HF backend, loading: {model_name}")
         t0 = time.time()
@@ -194,7 +188,14 @@ class _HFBackend:
         if cfg.model.attn_impl:
             model_kwargs["attn_implementation"] = cfg.model.attn_impl
 
-        self._model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=".*torch_dtype.*deprecated.*",
+                category=FutureWarning,
+            )
+            self._model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
         self._model.eval()
 
         if self._dtype is None:
@@ -355,18 +356,15 @@ class _HFBackend:
         if self._kv_cache is not None and not getattr(self, "_is_param2", False):
             gen_kwargs["past_key_values"] = self._kv_cache
         elif getattr(self, "_is_param2", False):
-            if self._kv_cache is not None:
-                # Wrap TurboQuantKVCache in a param2-compatible interface
-                from bhaskera.inference.kv_cache import Param2TurboQuantCache
-                gen_kwargs["past_key_values"] = Param2TurboQuantCache(self._kv_cache)
-                logger.info("[Engine] Param2: using Param2TurboQuantCache (TurboQuant + DynamicCache interface)")
-            else:
-                try:
-                    from transformers import DynamicCache
-                    gen_kwargs["past_key_values"] = DynamicCache()
-                    logger.info("[Engine] Param2: using DynamicCache for KV reuse (no TurboQuant)")
-                except ImportError:
-                    logger.warning("[Engine] DynamicCache unavailable — running without KV cache")
+            # Param2 has tiny KV (8 KV heads × 64 dim × 21 layers).
+            # At 2000 tokens that's ~86MB — TurboQuant compression overhead
+            # costs more than it saves. DynamicCache is optimal here.
+            try:
+                from transformers import DynamicCache
+                gen_kwargs["past_key_values"] = DynamicCache()
+                logger.info("[Engine] Param2: DynamicCache (KV too small to benefit from TurboQuant)")
+            except ImportError:
+                logger.warning("[Engine] DynamicCache unavailable — running without KV cache")
 
         # Use CUDA autocast for AMP
         ctx = (
