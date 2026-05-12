@@ -1,33 +1,8 @@
 """
 Bhaskera config — single source of truth.
 
-Changes vs v2:
-  * ``logging.tracker`` may now be a list:
-        tracker: ["wandb", "ray"]    # both
-        tracker: "wandb"              # legacy single-string still OK
-        tracker: null                  # → Ray Dashboard only (default)
-  * ``logging.tags`` and ``logging.group`` for cohort filtering in
-    W&B / MLflow.
-  * NEW ``monitoring`` block — Ray Dashboard, Prometheus, Grafana,
-    and per-step custom-metric toggles.  See ``MonitoringConfig``.
-  * MFU / throughput config: ``monitoring.peak_tflops_per_gpu`` plus
-    ``monitoring.metrics_every_n_steps``.
 
-Phase 1 changes:
-  * DataConfig extended with tokenized_path, cache_dir, overwrite_cache,
-    tokenize_batch_size, tokenize_compression, prefetch_batches,
-    local_shuffle_buffer_multiplier, pack_sequences.
 
-DDP-parity fix (this revision):
-  * ``DDPConfig`` now carries ``activation_checkpointing`` and
-    ``static_graph`` so the DDP path can apply AC and opt in to
-    static-graph optimisation, mirroring the FSDP feature set.
-    Previously AC was an FSDP-only knob, which silently OOM'd DDP runs.
-
-The ``tracker`` field type is widened to ``Optional[Any]`` because
-YAML can deliver either a string, a list, or null and we want to
-defer validation to the loggers package (where the error message is
-informative).
 """
 from __future__ import annotations
 

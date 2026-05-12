@@ -4,14 +4,7 @@ bhaskera.models.loader
 Load an HF `AutoModelForCausalLM` (or a registered custom loader), run
 introspection, and optionally attach LoRA.
 
-Changes vs v1:
-  * Removed `model_config.output_router_logits = True` mutation at load
-    time.  The training loop now passes `output_router_logits=True` per
-    forward call when the profile reports aux-loss support, so there is
-    no duplicated state to keep in sync.
-  * `torch_dtype="auto"` no longer resolves through our DTYPE_MAP; we
-    hand it directly to HF and then read the true dtype off the loaded
-    params via introspection.
+
 """
 from __future__ import annotations
 

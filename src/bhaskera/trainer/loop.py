@@ -3,41 +3,7 @@ bhaskera.trainer.loop
 =====================
 Pure training loop.
 
-Phase 1 fixes:
-  loop (critical) — gradient-sync suppression during accumulation now uses
-                    FSDP2's set_requires_gradient_sync() instead of the
-                    FSDP1-style model.no_sync() context manager.
-                    model.no_sync() is NOT available on FSDP2-wrapped models,
-                    and PEFT wrappers (PeftModel / LoraModel) do not delegate
-                    it through __getattr__.  set_requires_gradient_sync()
-                    operates directly on the underlying FSDP state and is
-                    immune to wrapper chains.
-  fix #16         — iter_torch_batches uses prefetch_batches from config.
-  loop            — drop_last=True prevents shape mismatches in the last batch.
-  loop            — explicit dtypes in iter_torch_batches (int64 for embedding lookup).
 
-DDP-parity fix (this revision):
-  _set_grad_sync now dispatches for BOTH FSDP2 and DDP.  Previously the DDP
-  branch silently no-op'd (the FSDP-only import path was swallowed by a bare
-  except), so every micro-step in a grad-accumulation window fired a full
-  all-reduce.  Math still came out correct, but bandwidth was wasted by a
-  factor of grad_accum.
-
-  The fix:
-    * FSDP2 path unchanged: set_requires_gradient_sync(model, enabled)
-    * DDP path: model.require_backward_grad_sync = enabled
-                (this is the underlying flag that no_sync() toggles)
-    * static_graph guard: DDP's static_graph optimisation caches the
-                          reduction graph from iteration 1; toggling sync
-                          between iterations is incompatible. If
-                          static_graph is on, we skip the toggle and let
-                          DDP all-reduce every micro-step (the cost the
-                          user opted into by choosing static_graph).
-
-Existing invariants preserved:
-  * Loss averaging across the whole grad-accum window.
-  * Autocast only for DDP — FSDP2's MixedPrecisionPolicy already casts.
-  * Barrier before checkpoint.
 """
 from __future__ import annotations
 

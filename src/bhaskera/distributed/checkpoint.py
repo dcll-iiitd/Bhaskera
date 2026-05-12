@@ -3,14 +3,6 @@ bhaskera.distributed.checkpoint
 ================================
 Sharded checkpointing via torch.distributed.checkpoint (DCP).
 
-Phase 1 fixes:
-  fix #12 — DCP API compatibility shim: PyTorch ≥ 2.5 removed the
-             checkpoint_id= kwarg from dcp.save/load.  _dcp_save and
-             _dcp_load dispatch to the right call based on torch version.
-  fix #13 — Atomic checkpoint write: writes to <path>.tmp first, then
-             renames to <path> only after all ranks complete.  A .complete
-             sentinel is written by rank-0 so maybe_resume can distinguish
-             finished checkpoints from partially-written ones.
 
 On-disk layout for one checkpoint:
     <path>/

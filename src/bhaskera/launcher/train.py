@@ -9,12 +9,7 @@ Local (1–N GPUs):
 SLURM (called by scripts/submit.sh after Ray cluster is bootstrapped):
     python -m bhaskera.launcher.train --config configs/config.yaml --num-workers 8
 
-Phase 1 fixes:
-  fix #26 — _count_gpus() now reads SLURM_NNODES × SLURM_GPUS_PER_NODE
-             when both env vars are set, instead of returning only the
-             head-node GPU count (which is always 1 on SLURM login nodes).
-  fix #10 — world_size is passed to build_ray_dataset() so partitioning
-             is world-size-aware.
+
 """
 from __future__ import annotations
 import argparse

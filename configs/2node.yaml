@@ -123,43 +123,31 @@ checkpoint:
 # Logging
 # -----------------------------------------------------------------------------
 logging:
-  tracker: "wandb"              # wandb | mlflow | ["wandb", "ray"] | null (Ray Dashboard only)
+  tracker: "mlflow"
   project: "bhaskera"
   run_name: "param2-17b-thinking-ultrachat-4gpu-2pernode"
+  mlflow_tracking_uri: ""  # leave empty → defaults to ~/mlflow-runs
+  mlflow_log_all_ranks: false
+  mlflow_log_artifacts_every: 50
   log_gpu_every_n_steps: 10
-  tags: ["sft", "lora", "moe", "param2", "ultrachat", "4gpu"]
-  group: null                   # set to e.g. "lr-sweep" to group W&B runs
 
 # -----------------------------------------------------------------------------
-# Monitoring — Ray Dashboard on; Prometheus/Grafana off by default.
-# Enable Prometheus/Grafana by pointing them at your existing servers
-# (Bhaskera does NOT spin them up for you).
+# Monitoring
 # -----------------------------------------------------------------------------
 monitoring:
-  dashboard: true
-  dashboard_host: "0.0.0.0"     # bind to all interfaces so SSH port-forward works
-  dashboard_port: 8265
-  metrics_export_port: 8080     # Prometheus scrapes this on each node
-
-  prometheus:
-    enabled: true              # set true if you have a Prometheus server
-    host: "http://localhost:9090"
-    name: "Prometheus"
-
-  grafana:
-    enabled: true              # set true to embed panels in the Ray Dashboard
-    host: "http://localhost:3000"
-    iframe_host: null
-    org_id: "1"
+  dashboard: true          # Ray Dashboard — job/actor/resource view
+  dashboard_host: "0.0.0.0"
+  dashboard_port: 8265     # access via ssh -L 8265:localhost:8265
+  metrics_export_port: 8080
 
   metrics:
     enabled: true
-    system_every_n_steps: 10    # GPU/CPU/IO push cadence (every rank)
-    cuda_every_n_steps: 10      # PyTorch CUDA-allocator push cadence
+    system_every_n_steps: 1
+    cuda_every_n_steps: 2
     gpu: true
     cpu: true
     cuda_memory: true
     throughput: true
-    peak_tflops_per_gpu: 312.0  # A100 bf16=312; H100≈989; RTX 4090≈165; L4≈121
-    throughput_window: 50
+    peak_tflops_per_gpu: 312.0     # update to 165.0 for RTX 4090, 121.0 for L4
+    throughput_window: 5
     throughput_warmup: 5

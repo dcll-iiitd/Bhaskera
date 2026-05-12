@@ -25,14 +25,7 @@ YAML usage (training — only needs the cache):
       tokenized_path:     /scratch/cache/local_train_<hash>
       val_tokenized_path: /scratch/cache/local_val_<hash>
 
-Bug fix vs the original Phase-2 cut
------------------------------------
-The previous ``build()`` evaluated ``_build_raw(cfg)`` eagerly even when
-the caller only had a pre-tokenized cache configured. That works for the
-HF builders (ultrachat etc.) because their _build_raw silently calls HF
-Hub, but for local data it crashes with "data.train_path must be set"
-during training. We now check ``cfg.data.tokenized_path`` first and skip
-the raw step entirely in that case — the cache is self-contained.
+
 """
 from __future__ import annotations
 
@@ -166,9 +159,7 @@ def build(cfg, world_size: int = 1) -> ray.data.Dataset:
                                        (slow; usually you want the
                                        bhaskera-tokenize CLI instead).
     """
-    # ── Cache path: short-circuit, ignore train_path entirely. ───────────
-    # This is the fix for the "data.train_path must be set" crash that
-    # happened during training when only tokenized_path was configured.
+    
     if cfg.data.tokenized_path:
         logger.info(
             f"local dataset: loading pre-tokenized cache "
@@ -180,14 +171,7 @@ def build(cfg, world_size: int = 1) -> ray.data.Dataset:
     return tokenize_dataset(_build_raw(cfg), cfg, "text", world_size=world_size)
 
 
-# ---------------------------------------------------------------------------
-# Optional helper: load the validation cache from the same config.
-#
-# build_ray_dataset() returns one dataset; the existing trainer launcher
-# does not auto-load a second one for evaluation. If you wire periodic
-# eval into your training loop, call this from the driver alongside
-# build_ray_dataset() and pass the returned dataset to your eval step.
-# ---------------------------------------------------------------------------
+
 
 def build_val_ray_dataset(cfg, world_size: int = 1) -> Optional[ray.data.Dataset]:
     """

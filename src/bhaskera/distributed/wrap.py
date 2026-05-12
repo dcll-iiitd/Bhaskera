@@ -3,14 +3,7 @@ bhaskera.distributed.wrap
 =========================
 Dispatcher that chooses FSDP2 or DDP based on config.
 
-Phase 1 additions (fix #3, #9):
-  _wait_for_dist()        — polls until dist.is_initialized() to prevent
-                            the placement-group race between Ray TorchTrainer
-                            init and wrap_model().
-  _verify_all_ranks_live() — all-reduces a probe tensor so we fail fast if a
-                            rank is missing before any model work begins.
 
-Call these at the very top of worker_fn (before build_model / wrap_model).
 """
 from __future__ import annotations
 

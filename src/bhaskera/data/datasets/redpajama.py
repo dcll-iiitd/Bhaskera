@@ -1,9 +1,5 @@
-"""RedPajama-Data-1T sample dataset (togethercomputer/RedPajama-Data-1T-Sample).
 
-Phase 1: split into a raw builder (registered via @register_raw) and a
-tokenized builder (registered via @register).  The raw builder is used by
-bhaskera-tokenize to persist a one-shot tokenization to disk.
-"""
+
 from __future__ import annotations
 
 import ray.data

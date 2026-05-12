@@ -4,13 +4,7 @@ bhaskera.launcher.worker
 Per-GPU entry point.  Called by Ray Train's TorchTrainer for each
 actor and also directly by raw SLURM workers.
 
-Changes vs v2:
-    * **Every rank now gets a logger**, not just rank 0.  Rank-0
-      logger fans out to W&B / MLflow as before; non-rank-0 loggers
-      contain only the Ray Prometheus child so per-GPU stats from
-      every worker land on the dashboard with a ``rank`` tag.
-    * Passes ``rank`` and ``world_size`` into ``build_logger`` so the
-      backends can tag samples appropriately.
+
 """
 from __future__ import annotations
 

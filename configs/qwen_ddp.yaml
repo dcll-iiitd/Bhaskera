@@ -98,38 +98,31 @@ checkpoint:
   keep_last_n: 2
 
 logging:
-  tracker: "wandb"
+  tracker: "mlflow"
   project: "bhaskera"
-  run_name: "qwen25-14b-ultrachat-4gpu-ddp"
-  log_gpu_every_n_steps: 50
-  tags: ["sft", "lora", "dense", "qwen2.5", "ultrachat", "ddp"]
-  group: null
+  run_name: "qwen-ddp-run1"
+  mlflow_tracking_uri: ""  # leave empty → defaults to ~/mlflow-runs
+  mlflow_log_all_ranks: false
+  mlflow_log_artifacts_every: 50
+  log_gpu_every_n_steps: 10
 
+# -----------------------------------------------------------------------------
+# Monitoring
+# -----------------------------------------------------------------------------
 monitoring:
-  dashboard: true
+  dashboard: true          # Ray Dashboard — job/actor/resource view
   dashboard_host: "0.0.0.0"
-  dashboard_port: 8265
+  dashboard_port: 8265     # access via ssh -L 8265:localhost:8265
   metrics_export_port: 8080
-
-  prometheus:
-    enabled: true
-    host: "http://localhost:9090"
-    name: "Prometheus"
-
-  grafana:
-    enabled: true
-    host: "http://localhost:3000"
-    iframe_host: null
-    org_id: "1"
 
   metrics:
     enabled: true
-    system_every_n_steps: 50
-    cuda_every_n_steps: 50
+    system_every_n_steps: 1
+    cuda_every_n_steps: 2
     gpu: true
     cpu: true
     cuda_memory: true
     throughput: true
-    peak_tflops_per_gpu: 312.0
-    throughput_window: 50
-    throughput_warmup: 10
+    peak_tflops_per_gpu: 312.0     # update to 165.0 for RTX 4090, 121.0 for L4
+    throughput_window: 5
+    throughput_warmup: 5

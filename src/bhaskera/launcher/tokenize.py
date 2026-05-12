@@ -24,12 +24,7 @@ After running, paste the printed YAML snippet into your training config:
       tokenized_path:     "/scratch/cache/local_train_<hash>"
       val_tokenized_path: "/scratch/cache/local_val_<hash>"
 
-Phase 2 additions:
-  * --split {train,val,both}   — which split(s) to tokenize.
-  * --format NAME              — overrides cfg.data.format.
-  * --train-path / --val-path  — override cfg.data.{train,val}_path.
-  * Per-split cache dir name (``local_train_<hash>`` vs ``local_val_<hash>``)
-    so the two never collide.
+
 """
 from __future__ import annotations
 

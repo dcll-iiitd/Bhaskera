@@ -3,16 +3,7 @@ bhaskera.trainer.checkpointing
 ==============================
 Periodic-save and resume helpers.
 
-Changes vs v1:
-  * Uses the DCP-based save_checkpoint / load_checkpoint from
-    bhaskera.distributed.checkpoint.  Checkpoints are now DIRECTORIES
-    (e.g.  step_0000500/), not .pt files.
-  * `_maybe_resume` parses the step number out of directory names
-    explicitly instead of relying on lexical sort.
-  * `save_and_prune` inserts a dist.barrier() before any collective save
-    so stragglers don't deadlock the all-gather.
-  * The "best_ckpts" list truly means "best by avg_loss" — older
-    checkpoints are pruned by the worst score, not by insertion order.
+
 """
 from __future__ import annotations
 

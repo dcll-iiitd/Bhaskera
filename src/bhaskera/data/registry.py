@@ -11,10 +11,8 @@ Phase 1 changes:
   fix #10 — build_ray_dataset now accepts world_size so partitioning is
             world-size-aware.
 
-Phase 2 (chat-format) addition:
-  call_raw_builder(name, cfg, split=None) — calls a raw builder, forwarding
-  ``split`` only if the builder declares a ``split`` parameter. Existing
-  builders (ultrachat, openassistant, redpajama) need no changes.
+
+ 
 
 Adding a new dataset:
 

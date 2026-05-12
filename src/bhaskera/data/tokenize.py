@@ -3,26 +3,7 @@ bhaskera.data.tokenize
 ======================
 Stateful Ray-Data tokeniser with persistent caching.
 
-Phase 1 fixes (kept from before):
-  #2  — persist_tokenized() caches tokenized dataset to disk so it is never
-         re-tokenized on subsequent epochs or runs.
-  #6  — _cache_version_hash uses hashlib.sha256 (never Python's hash()).
-  #10 — _compute_num_partitions is world-size-aware.
-  #16 — map_batches uses output_compression and prefetch_batches.
-  #27 — batch_size in map_batches comes from cfg.data.tokenize_batch_size.
 
-CRITICAL label-masking (from v2):
-  labels[attention_mask == 0] = -100 so the LM loss ignores pad positions.
-
-Phase 2 (chat-format) additions:
-  * TokenizerActor accepts optional ``format_name`` + ``format_options``.
-    When set, each row is rendered to a string via the format registry
-    *inside* the actor — so we keep one tokenizer load per worker.
-  * _cache_version_hash now mixes in (format_name, format_options) so
-    swapping format invalidates the cache automatically.
-  * persist_tokenized() and tokenize_dataset() read these fields from
-    cfg.data and forward them. The tokenize CLI also passes a per-call
-    ``dataset_name`` so train and val don't share a cache directory.
 """
 from __future__ import annotations
 

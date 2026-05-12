@@ -4,27 +4,7 @@ bhaskera.distributed.ddp
 DDP wrap. MoE-aware: forces find_unused_parameters=True for MoE so routing
 to a subset of experts per forward pass doesn't crash DDP.
 
-DDP-parity fix (this revision):
-  * Activation checkpointing is now applied to the inner module BEFORE
-    DDP wraps it. Previously AC was FSDP-only and DDP runs silently
-    OOM'd on any model big enough to need it.
 
-    Ordering matters: AC must run before the DDP constructor because
-    DDP snapshots the parameter graph during __init__
-    (_build_param_to_name_mapping, _build_reducer). Applying AC after
-    that snapshot — e.g. by walking DDP.modules() and wrapping decoder
-    layers in-place — mutates parameter ownership behind DDP's back,
-    leading to "Expected to have finished reduction in the prior
-    iteration before starting a new one" errors.
-
-  * static_graph is plumbed through. DDP itself enforces
-    static_graph=True ⇒ find_unused_parameters=False; we silently
-    downgrade with a warning if the user asks for both, since MoE
-    forces find_unused_parameters=True.
-
-  * Works for both dense and MoE: AC selects per-decoder-layer
-    granularity for dense and per-expert granularity for MoE, driven
-    off the ModelProfile from introspect.py.
 """
 from __future__ import annotations
 
