@@ -1,10 +1,5 @@
 """
-Tests for bhaskera.inference (v2 optimised) — no GPU or real model needed.
-
-New tests added for v2:
-  - O(1) amortised decode: verify dequantize count doesn't grow with seq_len
-  - Incremental cache consistency: decode cache matches full reconstruction
-  - torch.bucketize codebook: verify FastLloydMaxCodebook round-trip
+Tests for bhaskera.inference — no GPU or real model needed.
 
 Run with:
     pytest src/bhaskera/inference/tests/test_inference.py -v
@@ -65,7 +60,6 @@ class TestLloydMaxCodebook:
 
 class TestFastLloydMaxCodebook:
     def test_matches_slow_codebook(self):
-        """bucketize results should agree with argmin for interior values."""
         from bhaskera.inference.kv_cache import FastLloydMaxCodebook
         from bhaskera.inference.lloyd_max import LloydMaxCodebook
 
@@ -75,13 +69,12 @@ class TestFastLloydMaxCodebook:
 
         torch.manual_seed(1)
         x = torch.randn(500) * (1.0 / math.sqrt(64))
-        # Exclude boundary-crossing samples (argmin and bucketize may differ by 1 at exact boundaries)
         x = x.clamp(cb_slow.centroids[0].item() + 1e-4,
                     cb_slow.centroids[-1].item() - 1e-4)
 
         idx_fast = cb_fast.quantize(x.unsqueeze(-1)).squeeze(-1)
         idx_slow = cb_slow.quantize(x)
-        assert (idx_fast == idx_slow).all(), "Fast and slow codebooks should agree"
+        assert (idx_fast == idx_slow).all()
 
     def test_round_trip_quality(self):
         from bhaskera.inference.kv_cache import FastLloydMaxCodebook
@@ -94,7 +87,7 @@ class TestFastLloydMaxCodebook:
 
 
 # ===========================================================================
-# Sampling utilities (unchanged)
+# Sampling utilities
 # ===========================================================================
 
 class TestSampling:
@@ -147,7 +140,7 @@ class TestStaticKVCache:
 
 
 # ===========================================================================
-# TurboQuantKVCache — correctness + O(1) performance
+# TurboQuantKVCache
 # ===========================================================================
 
 class TestTurboQuantKVCache:
@@ -172,29 +165,20 @@ class TestTurboQuantKVCache:
         assert c.seq_len == 0
 
     def test_reconstruction_quality_k4v2(self):
-        """Round-trip cosine similarity should be > 0.92 with K4/V2."""
         c = self._make(key_bits=4, value_bits=2, residual_window=0)
         torch.manual_seed(7)
         k = torch.randn(1, 4, 32, 64)
         v = torch.randn_like(k)
-
-        # Force immediate compression (residual_window=0 means evict everything)
         fk, fv = c.update(k, v, 0)
-
-        k_flat    = k.reshape(-1, 64)
-        fk_flat   = fk.reshape(-1, 64)
-        cos_sim   = F.cosine_similarity(k_flat, fk_flat, dim=-1).mean().item()
+        cos_sim = F.cosine_similarity(
+            k.reshape(-1, 64), fk.reshape(-1, 64), dim=-1
+        ).mean().item()
         assert cos_sim > 0.92, f"Cosine similarity {cos_sim:.4f} too low"
 
     def test_incremental_matches_full(self):
-        """
-        Decode cache must be consistent regardless of whether tokens arrive
-        one at a time or in a batch.
-        """
         from bhaskera.inference.kv_cache import TurboQuantKVCache
         torch.manual_seed(42)
 
-        # Batch path: all 20 tokens in one call
         c_batch = TurboQuantKVCache(
             num_layers=1, batch_size=1, num_heads=2, head_dim=32,
             key_bits=4, value_bits=2, residual_window=4, protected_layers=0,
@@ -202,73 +186,57 @@ class TestTurboQuantKVCache:
         )
         k_all = torch.randn(1, 2, 20, 32)
         v_all = torch.randn_like(k_all)
-        fk_batch, fv_batch = c_batch.update(k_all, v_all, layer_idx=0)
+        fk_batch, _ = c_batch.update(k_all, v_all, layer_idx=0)
 
-        # Incremental path: same tokens one at a time
         c_incr = TurboQuantKVCache(
             num_layers=1, batch_size=1, num_heads=2, head_dim=32,
             key_bits=4, value_bits=2, residual_window=4, protected_layers=0,
             max_seq_len=64, dtype=torch.float32, device=torch.device("cpu"),
         )
         for t in range(20):
-            fk_incr, fv_incr = c_incr.update(
+            fk_incr, _ = c_incr.update(
                 k_all[:, :, t:t+1, :], v_all[:, :, t:t+1, :], layer_idx=0
             )
 
-        # Last incremental output should match batch output
-        assert fk_incr.shape[2] == fk_batch.shape[2], "Sequence lengths must match"
-        # Quality check: both should be close to original
+        assert fk_incr.shape[2] == fk_batch.shape[2]
         cos_batch = F.cosine_similarity(
             fk_batch.reshape(-1, 32), k_all.reshape(-1, 32), dim=-1
         ).mean().item()
         cos_incr = F.cosine_similarity(
             fk_incr.reshape(-1, 32), k_all.reshape(-1, 32), dim=-1
         ).mean().item()
-        assert abs(cos_batch - cos_incr) < 0.05, (
-            f"Batch ({cos_batch:.4f}) and incremental ({cos_incr:.4f}) quality should match"
-        )
+        assert abs(cos_batch - cos_incr) < 0.05
 
     def test_amortised_O1_per_step(self):
-        """
-        Decode time per step must NOT grow linearly with sequence length.
-        (This test catches a regression back to the O(n²) original.)
-        """
         from bhaskera.inference.kv_cache import TurboQuantKVCache
-
         cache = TurboQuantKVCache(
             num_layers=1, batch_size=1, num_heads=4, head_dim=64,
             key_bits=4, value_bits=2, residual_window=16, protected_layers=0,
             max_seq_len=512, dtype=torch.float32, device=torch.device("cpu"),
         )
 
-        # Warm up (first few steps may be slower due to codebook init)
         for _ in range(10):
             cache.update(torch.randn(1,4,1,64), torch.randn(1,4,1,64), 0)
         cache.advance(10)
 
-        # Measure 10 steps near token 20 (short history)
         t0 = time.perf_counter()
         for _ in range(10):
             cache.update(torch.randn(1,4,1,64), torch.randn(1,4,1,64), 0)
         t_short = (time.perf_counter() - t0) / 10
 
-        # Advance to token 200 (much longer history)
         for _ in range(180):
             cache.update(torch.randn(1,4,1,64), torch.randn(1,4,1,64), 0)
         cache.advance(200)
 
-        # Measure 10 steps near token 200
         t0 = time.perf_counter()
         for _ in range(10):
             cache.update(torch.randn(1,4,1,64), torch.randn(1,4,1,64), 0)
         t_long = (time.perf_counter() - t0) / 10
 
-        # Should not be more than 5× slower at 10× the sequence length
         ratio = t_long / t_short
         assert ratio < 5.0, (
-            f"Step time grew {ratio:.1f}× from short to long history "
-            f"(expected ~1×, got {t_short*1000:.1f}ms → {t_long*1000:.1f}ms). "
-            f"O(n²) regression detected!"
+            f"Step time grew {ratio:.1f}× — O(n²) regression detected "
+            f"({t_short*1000:.1f}ms → {t_long*1000:.1f}ms)"
         )
 
 
@@ -350,21 +318,105 @@ class TestInferenceConfig:
 
 
 # ===========================================================================
-# Ray orchestration toggle for vLLM
+# Ray+vLLM backend — unit tests (no real Ray/vLLM needed)
 # ===========================================================================
 
-class TestVLLMRayOrchestration:
-    def test_direct_mode_disables_ray(self, monkeypatch):
-        from bhaskera.inference import vllm_turboquant
+class TestRayInit:
+    """Test _ensure_ray_initialized behaviour without touching a real cluster."""
 
-        monkeypatch.setenv("BHASKERA_VLLM_ORCHESTRATION", "direct")
-        assert vllm_turboquant._should_use_ray_for_vllm() is False
+    def test_skips_when_already_initialised(self, monkeypatch):
+        fake_ray = types.ModuleType("ray")
+        fake_ray.is_initialized = lambda: True
+        fake_ray.init = lambda **kw: (_ for _ in ()).throw(
+            AssertionError("ray.init should not be called if already initialised")
+        )
+        fake_ray.available_resources = lambda: {}
+        monkeypatch.setitem(sys.modules, "ray", fake_ray)
 
-    def test_ray_mode_enables_ray_when_available(self, monkeypatch):
-        from bhaskera.inference import vllm_turboquant
+        from bhaskera.inference.backends import ray_vllm
+        # Should not raise
+        ray_vllm._ensure_ray_initialized(1)
+
+    def test_uses_ray_address_env_var(self, monkeypatch):
+        calls = []
 
         fake_ray = types.ModuleType("ray")
         fake_ray.is_initialized = lambda: False
+        fake_ray.available_resources = lambda: {}
+
+        def _fake_init(**kw):
+            calls.append(kw)
+
+        fake_ray.init = _fake_init
         monkeypatch.setitem(sys.modules, "ray", fake_ray)
-        monkeypatch.setenv("BHASKERA_VLLM_ORCHESTRATION", "ray")
-        assert vllm_turboquant._should_use_ray_for_vllm() is True
+        monkeypatch.setenv("RAY_ADDRESS", "10.0.0.1:6379")
+
+        from bhaskera.inference.backends import ray_vllm
+        ray_vllm._ensure_ray_initialized(2)
+
+        assert any(kw.get("address") == "10.0.0.1:6379" for kw in calls)
+
+
+class TestEngineBackendSelection:
+    """Test that InferenceEngine picks the right backend."""
+
+    def test_forces_hf_via_env(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("BHASKERA_BACKEND", "hf")
+
+        loaded = []
+
+        class _FakeHF:
+            def __init__(self, *a, **kw): loaded.append("hf")
+            def generate(self, **kw): return ["ok"]
+
+        monkeypatch.setattr(
+            "bhaskera.inference.engine._vllm_available", lambda: True
+        )
+
+        import importlib
+        import bhaskera.inference.engine as engine_mod
+        original_load_hf = engine_mod.InferenceEngine._load_hf
+
+        def _patched_load_hf(self):
+            loaded.append("hf")
+            self._backend = _FakeHF()
+            self._backend_name = "hf"
+            self._loaded = True
+
+        monkeypatch.setattr(engine_mod.InferenceEngine, "_load_hf", _patched_load_hf)
+
+        from bhaskera.config import Config
+        engine = engine_mod.InferenceEngine(Config())
+        engine.load()
+
+        assert "hf" in loaded
+        assert engine._backend_name == "hf"
+
+    def test_warns_on_turboquant_with_vllm(self, monkeypatch, caplog):
+        import logging
+        import bhaskera.inference.engine as engine_mod
+
+        def _noop_load_vllm(self):
+            self._backend = object()
+            self._backend_name = "ray_vllm"
+            self._loaded = True
+
+        monkeypatch.setattr(engine_mod.InferenceEngine, "_load_vllm", _noop_load_vllm)
+        monkeypatch.setattr(engine_mod, "_vllm_available", lambda: True)
+        monkeypatch.setenv("BHASKERA_BACKEND", "vllm")
+
+        from bhaskera.config import Config
+        cfg = Config()
+        cfg.inference.kv_cache = "turboquant"
+
+        import torch
+        monkeypatch.setattr(
+            "bhaskera.inference.engine._resolve_device",
+            lambda _: torch.device("cuda"),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="bhaskera.inference.engine"):
+            e = engine_mod.InferenceEngine(cfg)
+            e.load()
+
+        assert any("turboquant" in r.message.lower() for r in caplog.records)

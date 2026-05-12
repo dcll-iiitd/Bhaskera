@@ -1,36 +1,60 @@
 """
-bhaskera-infer — command-line inference entry point (v2).
+bhaskera-infer — command-line inference entry point (v3, Ray+vLLM)
 
-Changes vs v1:
-  - Tokens/second reported after every generation
-  - Token count measured from actual output ids (not char count)
-  - Thinking models: <think> block stripped from terminal output by default
-    (--show-thinking to display it; raw text is always saved if --output-file)
-  - TurboQuant stats line always shown when cache is active
-  - Cleaner separator / stats block
+Backend selection
+-----------------
+  Auto (default):  Ray+vLLM on CUDA, HF generate() everywhere else.
+  BHASKERA_BACKEND=vllm  Force Ray+vLLM
+  BHASKERA_BACKEND=hf    Force HF generate() (CPU / dev / no-vLLM)
+
+SLURM / multi-node
+------------------
+  Set RAY_ADDRESS=<head>:<port> in your batch script, or pass
+  --ray-address <addr> to this CLI.
+
+  Minimal SLURM example::
+
+      #!/bin/bash
+      #SBATCH --nodes=1
+      #SBATCH --gres=gpu:4
+      ray start --head --num-gpus=4 --port=6379
+      export RAY_ADDRESS="localhost:6379"
+      bhaskera-infer --config configs/inference_param2.yaml \\
+                     --prompt "Explain attention mechanisms."
 
 Examples
 --------
     # Standard generation
-    bhaskera-infer --config configs/inference_turboquant.yaml \\
+    bhaskera-infer --config configs/inference_param2.yaml \\
                    --prompt "Explain attention mechanisms."
 
-    # Param2 Thinking model (strips <think> by default)
+    # Param2-Thinking (structured output, <think> hidden by default)
     bhaskera-infer --config configs/inference_param2.yaml \\
-                   --prompt "What is 17 × 23?"
+                   --prompt "What is 17 × 23?" --param2
 
-    # Show the chain-of-thought
+    # Show chain-of-thought
     bhaskera-infer --config configs/inference_param2.yaml \\
-                   --prompt "What is 17 × 23?" --show-thinking
+                   --prompt "What is 17 × 23?" --param2 --show-thinking
 
-    # Benchmark throughput
-    bhaskera-infer --config configs/inference_turboquant.yaml \\
-                   --prompt-file prompts.txt --max-new-tokens 256
+    # Multiple prompts from file + save output
+    bhaskera-infer --config configs/inference_param2.yaml \\
+                   --prompt-file prompts.txt --output-file results.txt
+
+    # Force HF backend (no vLLM required)
+    BHASKERA_BACKEND=hf bhaskera-infer --config configs/inference_turboquant.yaml \\
+                        --prompt "Hello"
+
+    # Explicit tensor-parallel size (4 GPUs)
+    bhaskera-infer --config configs/inference_param2.yaml \\
+                   --tensor-parallel-size 4 \\
+                   --prompt "Explain quantum entanglement."
 """
 from __future__ import annotations
 
 import argparse
 import logging
+import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -43,6 +67,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bhaskera.infer")
 
+SEP = "─" * 72
+
 
 # ---------------------------------------------------------------------------
 # Argument parser
@@ -51,53 +77,52 @@ logger = logging.getLogger("bhaskera.infer")
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="bhaskera-infer",
-        description="Bhaskera LLM inference engine CLI",
+        description="Bhaskera LLM inference CLI (Ray + vLLM)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # Config / model
-    p.add_argument("--config",  default=None,   help="Path to Bhaskera YAML config")
-    p.add_argument("--model",   default=None,   help="HuggingFace model id (overrides config)")
+    # ── Config / model ───────────────────────────────────────────────
+    p.add_argument("--config",  default=None, help="Path to Bhaskera YAML config")
+    p.add_argument("--model",   default=None, help="HuggingFace model id (overrides config)")
     p.add_argument("--device",  default="auto", help="Device: auto | cuda | cpu | mps")
 
-    # Input
+    # ── Input ────────────────────────────────────────────────────────
     inp = p.add_mutually_exclusive_group(required=True)
     inp.add_argument("--prompt",      default=None, help="Single prompt string")
     inp.add_argument("--prompt-file", default=None, metavar="FILE",
                      help="File with one prompt per line")
 
-    # Generation
-    p.add_argument("--max-new-tokens", type=int,   default=None)
-    p.add_argument("--temperature",    type=float, default=None)
-    p.add_argument("--top-p",          type=float, default=None)
-    p.add_argument("--top-k",          type=int,   default=None)
-    p.add_argument("--no-sample",      action="store_true",
+    # ── Generation ───────────────────────────────────────────────────
+    p.add_argument("--max-new-tokens",  type=int,   default=None)
+    p.add_argument("--temperature",     type=float, default=None)
+    p.add_argument("--top-p",           type=float, default=None)
+    p.add_argument("--top-k",           type=int,   default=None)
+    p.add_argument("--no-sample",       action="store_true",
                    help="Greedy decoding (overrides do_sample=true in config)")
+    p.add_argument("--return-full",     action="store_true",
+                   help="Include the prompt in the output")
 
-    # KV cache
-    p.add_argument("--kv-cache", default=None, choices=["static", "turboquant", "none"])
-    p.add_argument("--key-bits",          type=int, default=None)
-    p.add_argument("--value-bits",        type=int, default=None)
-    p.add_argument("--residual-window",   type=int, default=None)
-
-    # Speculative decoding
-    p.add_argument("--speculative",    action="store_true")
-    p.add_argument("--draft-model",    default=None)
-    p.add_argument("--num-draft-tokens", type=int, default=None)
-
-    # Thinking model
+    # ── Param2 / thinking model ───────────────────────────────────────
+    p.add_argument("--param2",         action="store_true",
+                   help="Use Param2 structured output (reasoning + final_answer)")
     p.add_argument("--show-thinking",  action="store_true",
                    help="Print <think> reasoning block (Param2 / thinking models)")
     p.add_argument("--system-prompt",  default="You are a helpful assistant.",
-                   help="System prompt injected for chat-template models")
+                   help="System prompt for chat-template models")
 
-    # Output
+    # ── Ray / infrastructure ──────────────────────────────────────────
+    p.add_argument("--ray-address",
+                   default=None, metavar="HOST:PORT",
+                   help="Ray cluster address (sets RAY_ADDRESS; for SLURM head node)")
+    p.add_argument("--tensor-parallel-size", type=int, default=None,
+                   help="Number of GPUs for tensor parallelism (vLLM, default: all visible)")
+    p.add_argument("--backend", default=None, choices=["vllm", "hf"],
+                   help="Force a specific backend (overrides BHASKERA_BACKEND env var)")
+
+    # ── Output ───────────────────────────────────────────────────────
     p.add_argument("--output-file", default=None, metavar="FILE",
-                   help="Write full raw output to file (one response per line)")
-    p.add_argument("--return-full",    action="store_true",
-                   help="Include the prompt in the output")
-    p.add_argument("--torch-compile",  action="store_true")
-    p.add_argument("--verbose", "-v",  action="store_true")
+                   help="Write raw outputs to file (one response per line)")
+    p.add_argument("--verbose", "-v", action="store_true")
 
     return p
 
@@ -107,13 +132,12 @@ def _build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 def _build_config(args: argparse.Namespace):
-    from bhaskera.config import (
-        Config, InferenceConfig, TurboQuantConfig, SpeculativeConfig,
-    )
+    """Load YAML config (if given) then apply CLI overrides."""
     if args.config:
         from bhaskera.config import load_config
         cfg = load_config(args.config)
     else:
+        from bhaskera.config import Config
         cfg = Config()
 
     if args.model:
@@ -123,55 +147,36 @@ def _build_config(args: argparse.Namespace):
 
     infer = cfg.inference
     if args.max_new_tokens is not None: infer.max_new_tokens = args.max_new_tokens
-    if args.temperature   is not None: infer.temperature    = args.temperature
-    if args.top_p         is not None: infer.top_p          = args.top_p
-    if args.top_k         is not None: infer.top_k          = args.top_k
-    if args.no_sample:                 infer.do_sample       = False
-    if args.torch_compile:             infer.torch_compile   = True
-    if args.kv_cache:                  infer.kv_cache        = args.kv_cache
+    if args.temperature    is not None: infer.temperature    = args.temperature
+    if args.top_p          is not None: infer.top_p          = args.top_p
+    if args.top_k          is not None: infer.top_k          = args.top_k
+    if args.no_sample:                  infer.do_sample       = False
 
-    if infer.kv_cache == "turboquant":
-        if args.key_bits        is not None: infer.turboquant.key_bits        = args.key_bits
-        if args.value_bits      is not None: infer.turboquant.value_bits      = args.value_bits
-        if args.residual_window is not None: infer.turboquant.residual_window = args.residual_window
-        infer.turboquant.enabled = True
-
-    if args.speculative:
-        infer.speculative.enabled = True
-    if args.draft_model:
-        infer.speculative.draft_model_name = args.draft_model
-        infer.speculative.enabled = True
-    if args.num_draft_tokens is not None:
-        infer.speculative.num_draft_tokens = args.num_draft_tokens
+    # Tensor-parallel size: store on InferenceConfig for backend to pick up
+    if args.tensor_parallel_size is not None:
+        infer.tensor_parallel_size = args.tensor_parallel_size
 
     return cfg
 
 
 # ---------------------------------------------------------------------------
-# Token counting helper
+# Output rendering helpers
 # ---------------------------------------------------------------------------
 
-def _count_output_tokens(text: str, tokenizer=None) -> int:
-    """
-    Count output tokens.
-    Uses the tokenizer when available (exact); falls back to word-count
-    heuristic (rough but doesn't require tokenizer access).
-    """
-    if tokenizer is not None:
-        try:
-            return len(tokenizer.encode(text, add_special_tokens=False))
-        except Exception:
-            pass
-    # Heuristic: ~0.75 tokens per word for English, ~1.3 for code/mixed
-    words = len(text.split())
-    return max(1, int(words * 0.9))
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_TOOL_RE  = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
 
 
-# ---------------------------------------------------------------------------
-# Output rendering
-# ---------------------------------------------------------------------------
+def _strip_thinking(text: str) -> str:
+    clean = _THINK_RE.sub("", text)
+    clean = _TOOL_RE.sub("", clean)
+    return clean.strip()
 
-SEP = "─" * 72
+
+def _count_tokens(text: str) -> int:
+    """Rough word-based token estimate (fallback when tokenizer unavailable)."""
+    return max(1, int(len(text.split()) * 0.9))
+
 
 def _render_output(
     idx: int,
@@ -181,23 +186,39 @@ def _render_output(
     is_thinking_model: bool,
     show_thinking: bool,
 ) -> str:
-    """Format one output for terminal display."""
     lines = []
     if total > 1:
         lines.append(f"\n{SEP}")
-        lines.append(f"[{idx + 1}/{total}] Prompt: {prompt[:80]}{'…' if len(prompt) > 80 else ''}")
+        lines.append(f"[{idx + 1}/{total}] {prompt[:80]}{'…' if len(prompt) > 80 else ''}")
         lines.append(SEP)
 
     if is_thinking_model and not show_thinking:
-        # Strip <think>...</think> for clean terminal output
-        import re
-        clean = re.sub(r"<think>.*?</think>", "", output_text, flags=re.DOTALL).strip()
-        # Also strip any leftover tool_call blocks
-        clean = re.sub(r"<tool_call>.*?</tool_call>", "", clean, flags=re.DOTALL).strip()
-        lines.append(clean)
+        lines.append(_strip_thinking(output_text))
     else:
         lines.append(output_text)
 
+    return "\n".join(lines)
+
+
+def _render_param2_output(
+    idx: int,
+    total: int,
+    prompt: str,
+    out,            # Param2Output
+    show_thinking: bool,
+) -> str:
+    lines = []
+    if total > 1:
+        lines.append(f"\n{SEP}")
+        lines.append(f"[{idx + 1}/{total}] {prompt[:80]}{'…' if len(prompt) > 80 else ''}")
+        lines.append(SEP)
+
+    if show_thinking and out.reasoning:
+        lines.append("── Reasoning ──")
+        lines.append(out.reasoning)
+        lines.append("── Answer ──")
+
+    lines.append(out.final_answer)
     return "\n".join(lines)
 
 
@@ -205,14 +226,24 @@ def _render_output(
 # Main
 # ---------------------------------------------------------------------------
 
-def main(argv: List[str] = None) -> None:
+def main(argv: Optional[List[str]] = None) -> None:
     parser = _build_parser()
     args   = parser.parse_args(argv)
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    # ── Prompts ──────────────────────────────────────────────────────
+    # ── Apply backend override ────────────────────────────────────────
+    if args.backend:
+        os.environ["BHASKERA_BACKEND"] = args.backend
+        logger.info(f"Backend forced to: {args.backend}")
+
+    # ── Apply Ray address override ────────────────────────────────────
+    if args.ray_address:
+        os.environ["RAY_ADDRESS"] = args.ray_address
+        logger.info(f"RAY_ADDRESS set to: {args.ray_address}")
+
+    # ── Load prompts ──────────────────────────────────────────────────
     if args.prompt:
         prompts = [args.prompt]
     else:
@@ -220,10 +251,10 @@ def main(argv: List[str] = None) -> None:
         if not path.exists():
             parser.error(f"Prompt file not found: {args.prompt_file}")
         with open(path) as f:
-            prompts = [line.rstrip("\n") for line in f if line.strip()]
+            prompts = [ln.rstrip("\n") for ln in f if ln.strip()]
         if not prompts:
             parser.error(f"No prompts found in {args.prompt_file}")
-        logger.info(f"Loaded {len(prompts)} prompts from {args.prompt_file}")
+        logger.info(f"Loaded {len(prompts)} prompt(s) from {args.prompt_file}")
 
     # ── Config ───────────────────────────────────────────────────────
     cfg = _build_config(args)
@@ -233,94 +264,74 @@ def main(argv: List[str] = None) -> None:
     engine = InferenceEngine(cfg)
     engine.load()
 
-    # ── Log active settings ───────────────────────────────────────────
-    infer = cfg.inference
-    logger.info(
-        f"Settings: kv_cache={infer.kv_cache!r} "
-        f"temperature={infer.temperature} top_p={infer.top_p} "
-        f"max_new_tokens={infer.max_new_tokens} "
-        f"speculative={infer.speculative.enabled}"
+    logger.info(f"Engine: {engine}")
+
+    # ── Detect thinking model ─────────────────────────────────────────
+    is_thinking = (
+        args.param2
+        or "param2" in cfg.model.name.lower()
+        or "thinking" in cfg.model.name.lower()
     )
-    if infer.kv_cache == "turboquant":
-        logger.info(
-            f"TurboQuant: K{infer.turboquant.key_bits}/V{infer.turboquant.value_bits} bits, "
-            f"residual_window={infer.turboquant.residual_window}, "
-            f"protected_layers={infer.turboquant.protected_layers}"
-        )
-
-    is_thinking = getattr(engine._backend, "_is_thinking", False) if engine._loaded else False
-
-    # Try to get tokenizer for accurate token counting
-    _tokenizer = None
-    try:
-        _tokenizer = getattr(engine._backend, "_tok", None)
-    except Exception:
-        pass
 
     # ── Generate ─────────────────────────────────────────────────────
     t0 = time.perf_counter()
 
-    outputs = engine.generate(
-        prompts,
-        max_new_tokens = args.max_new_tokens or infer.max_new_tokens,
-        temperature    = args.temperature or infer.temperature,
-        top_p          = args.top_p or infer.top_p,
-        top_k          = args.top_k or infer.top_k,
-        do_sample      = not args.no_sample and infer.do_sample,
-        return_full_text = args.return_full,
-    )
-
-    elapsed = time.perf_counter() - t0
-
-    # ── Count tokens ──────────────────────────────────────────────────
-    total_output_tokens = 0
-    thinking_tokens = 0
-    answer_tokens = 0
-
-    for o in outputs:
-        import re
-        think_match = re.search(r"<think>(.*?)</think>", o, re.DOTALL)
-        if think_match:
-            think_text = think_match.group(1)
-            thinking_tokens += _count_output_tokens(think_text, _tokenizer)
-        # Answer = everything outside think blocks
-        answer_text = re.sub(r"<think>.*?</think>", "", o, flags=re.DOTALL).strip()
-        answer_tokens += _count_output_tokens(answer_text, _tokenizer)
-        total_output_tokens += _count_output_tokens(o, _tokenizer)
-
-    tokens_per_second = total_output_tokens / elapsed if elapsed > 0 else 0.0
-    answer_tps = answer_tokens / elapsed if elapsed > 0 else 0.0
-
-    # ── Print results ──────────────────────────────────────────────────
-    raw_outputs = []
-    for i, (prompt, output) in enumerate(zip(prompts, outputs)):
-        rendered = _render_output(
-            i, len(prompts), prompt, output,
-            is_thinking_model=is_thinking,
-            show_thinking=args.show_thinking,
+    if args.param2:
+        # Structured Param2 output
+        outputs_raw = engine.generate_param2(
+            prompts,
+            system_prompt=args.system_prompt,
+            max_new_tokens=args.max_new_tokens or cfg.inference.max_new_tokens,
+            temperature=args.temperature or cfg.inference.temperature,
+            top_p=args.top_p or cfg.inference.top_p,
+            top_k=args.top_k or cfg.inference.top_k,
+            do_sample=not args.no_sample and cfg.inference.do_sample,
         )
-        print(rendered)
-        raw_outputs.append(output)
+        elapsed = time.perf_counter() - t0
 
-    # ── Stats block ────────────────────────────────────────────────────
-    print(f"\n{SEP}")
-    if thinking_tokens > 0:
-        print(
-            f"Generated {len(prompts)} response(s) | "
-            f"{answer_tokens} answer tokens + {thinking_tokens} thinking tokens | "
-            f"{elapsed:.2f}s | "
-            f"\033[1;32m{answer_tps:.1f} answer tok/s\033[0m "
-            f"({tokens_per_second:.1f} total tok/s)"
-        )
+        # Render
+        for i, (prompt, out) in enumerate(zip(prompts, outputs_raw)):
+            rendered = _render_param2_output(i, len(prompts), prompt, out, args.show_thinking)
+            print(rendered)
+
+        # Stats
+        total_answer_tokens = sum(_count_tokens(o.final_answer) for o in outputs_raw)
+        total_think_tokens  = sum(_count_tokens(o.reasoning)    for o in outputs_raw)
+        total_tokens        = total_answer_tokens + total_think_tokens
+        _print_stats(elapsed, len(prompts), total_tokens, total_answer_tokens, total_think_tokens)
+
+        # File output
+        if args.output_file:
+            _write_output_file(args.output_file, [o.raw for o in outputs_raw])
+
     else:
-        print(
-            f"Generated {len(prompts)} response(s) | "
-            f"{total_output_tokens} tokens | "
-            f"{elapsed:.2f}s | "
-            f"\033[1;32m{tokens_per_second:.1f} tok/s\033[0m"
+        # Plain text output
+        outputs = engine.generate(
+            prompts,
+            max_new_tokens=args.max_new_tokens or cfg.inference.max_new_tokens,
+            temperature=args.temperature or cfg.inference.temperature,
+            top_p=args.top_p or cfg.inference.top_p,
+            top_k=args.top_k or cfg.inference.top_k,
+            do_sample=not args.no_sample and cfg.inference.do_sample,
+            return_full_text=args.return_full,
         )
+        elapsed = time.perf_counter() - t0
 
-    # KV cache stats (TurboQuant)
+        for i, (prompt, text) in enumerate(zip(prompts, outputs)):
+            rendered = _render_output(
+                i, len(prompts), prompt, text,
+                is_thinking_model=is_thinking,
+                show_thinking=args.show_thinking,
+            )
+            print(rendered)
+
+        total_tokens = sum(_count_tokens(t) for t in outputs)
+        _print_stats(elapsed, len(prompts), total_tokens)
+
+        if args.output_file:
+            _write_output_file(args.output_file, outputs)
+
+    # ── KV cache stats ────────────────────────────────────────────────
     stats = engine.kv_cache_stats()
     if stats and stats.get("compression_ratio", 0) > 0:
         print(
@@ -328,20 +339,50 @@ def main(argv: List[str] = None) -> None:
             f"(bf16 baseline: {stats['bf16_mb']:.1f} MB, "
             f"ratio: {stats['compression_ratio']:.1f}×)"
         )
-    elif infer.kv_cache == "turboquant":
-        print("TurboQuant: configured but stats unavailable")
 
     # Thinking model note
-    if is_thinking and not args.show_thinking:
+    if is_thinking and not args.show_thinking and not args.param2:
         print("(Thinking/reasoning block hidden — use --show-thinking to display)")
 
-    # ── Optional file output ───────────────────────────────────────────
-    if args.output_file:
-        out_path = Path(args.output_file)
-        with open(out_path, "w") as f:
-            for raw in raw_outputs:
-                f.write(raw.replace("\n", "\\n") + "\n")
-        logger.info(f"Raw outputs written to {out_path}")
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _print_stats(
+    elapsed: float,
+    n_prompts: int,
+    total_tokens: int,
+    answer_tokens: Optional[int] = None,
+    thinking_tokens: Optional[int] = None,
+) -> None:
+    print(f"\n{SEP}")
+    tps = total_tokens / elapsed if elapsed > 0 else 0.0
+
+    if thinking_tokens and thinking_tokens > 0:
+        ans_tps = (answer_tokens or 0) / elapsed if elapsed > 0 else 0.0
+        print(
+            f"Generated {n_prompts} response(s) | "
+            f"{answer_tokens} answer tokens + {thinking_tokens} thinking tokens | "
+            f"{elapsed:.2f}s | "
+            f"\033[1;32m{ans_tps:.1f} answer tok/s\033[0m "
+            f"({tps:.1f} total tok/s)"
+        )
+    else:
+        print(
+            f"Generated {n_prompts} response(s) | "
+            f"{total_tokens} tokens | "
+            f"{elapsed:.2f}s | "
+            f"\033[1;32m{tps:.1f} tok/s\033[0m"
+        )
+
+
+def _write_output_file(path: str, texts: List[str]) -> None:
+    out_path = Path(path)
+    with open(out_path, "w") as f:
+        for t in texts:
+            f.write(t.replace("\n", "\\n") + "\n")
+    logger.info(f"Outputs written to {out_path}")
 
 
 if __name__ == "__main__":
