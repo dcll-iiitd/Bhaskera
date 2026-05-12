@@ -10,4 +10,4 @@ elif command -v module &>/dev/null && [[ -n "12.4" ]]; then
     module load cuda/12.4 2>/dev/null || true
 fi
 
-source "/scratch/ldls-iiitd/training-framework/newchanges/Bhaskera/.venv/bin/activate"
+source "/scratch/ldls-iiitd/training-framework/newchanges/test/Bhaskera/.venv/bin/activate"

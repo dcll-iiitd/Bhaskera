@@ -224,22 +224,7 @@ class LoggingConfig:
 
 # ── Monitoring sub-configs ────────────────────────────────────────────────
 
-@dataclass
-class PrometheusConfig:
-    """How Ray should reach a Prometheus server (for embedded panels)."""
-    enabled: bool = False
-    host: str = "http://localhost:9090"
-    name: str = "Prometheus"
-    headers: dict = field(default_factory=dict)
 
-
-@dataclass
-class GrafanaConfig:
-    """How Ray should embed Grafana panels into the dashboard."""
-    enabled: bool = False
-    host: str = "http://localhost:3000"
-    iframe_host: Optional[str] = None
-    org_id: str = "1"
 
 
 @dataclass
@@ -256,19 +241,14 @@ class MetricsConfig:
     throughput_window: int = 50
     throughput_warmup: int = 5
 
-
 @dataclass
 class MonitoringConfig:
-    """
-    Ray Dashboard / Prometheus / Grafana / per-step metrics.
-    """
-    dashboard: bool                = True
-    dashboard_host: str            = "0.0.0.0"
-    dashboard_port: int            = 8265
-    metrics_export_port: int       = 8080
-    prometheus: PrometheusConfig   = field(default_factory=PrometheusConfig)
-    grafana: GrafanaConfig         = field(default_factory=GrafanaConfig)
-    metrics: MetricsConfig         = field(default_factory=MetricsConfig)
+    """Ray Dashboard + per-step metrics (MLflow handles experiment tracking)."""
+    dashboard:           bool          = True
+    dashboard_host:      str           = "0.0.0.0"
+    dashboard_port:      int           = 8265
+    metrics_export_port: int           = 8080
+    metrics:             MetricsConfig = field(default_factory=MetricsConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -459,18 +439,6 @@ def _dict_to_config(raw: dict) -> Config:
             dashboard_host=str(mon_raw.get("dashboard_host", "0.0.0.0")),
             dashboard_port=int(mon_raw.get("dashboard_port", 8265)),
             metrics_export_port=int(mon_raw.get("metrics_export_port", 8080)),
-            prometheus=PrometheusConfig(
-                enabled=bool(prom_raw.get("enabled", False)),
-                host=str(prom_raw.get("host", "http://localhost:9090")),
-                name=str(prom_raw.get("name", "Prometheus")),
-                headers=dict(prom_raw.get("headers", {}) or {}),
-            ),
-            grafana=GrafanaConfig(
-                enabled=bool(graf_raw.get("enabled", False)),
-                host=str(graf_raw.get("host", "http://localhost:3000")),
-                iframe_host=graf_raw.get("iframe_host"),
-                org_id=str(graf_raw.get("org_id", "1") or "1"),
-            ),
             metrics=MetricsConfig(
                 enabled=bool(metrics_raw.get("enabled", True)),
                 system_every_n_steps=int(metrics_raw.get("system_every_n_steps", 10)),
