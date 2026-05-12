@@ -102,6 +102,4 @@ Core runtime (from `pyproject.toml`):
 
 Optional extras: `wandb`, `mlflow`, `flash` (`flash-attn>=2.5`), `inference` (`scipy`), `dev` (`pytest`, `ruff`).
 
-## License & status
 
-Internal research framework. Tested on A100 and 24 GB consumer GPUs (RTX 3090 / 4090, L4) with Param2-17B-A2.4B and Qwen2.5-14B. Single-source-of-truth for behaviour is the code; this README summarises it.
