@@ -41,6 +41,11 @@ def main():
     # 2. Init model engine
     logger.info(f"Loading engine with config: {args.config} ...")
     cfg = load_config(args.config)
+    
+    # Init logger
+    from bhaskera.utils import build_logger
+    tracker = build_logger(cfg)
+
     engine = InferenceEngine(cfg)
     try:
         engine.load()
@@ -79,6 +84,13 @@ def main():
             
         logger.info(f"Batch {i//args.batch_size + 1}/{(len(prompts)+args.batch_size-1)//args.batch_size} processed in {latency:.2f}s ({batch_tokens} tokens)")
         
+        if tracker:
+            tracker.log({
+                "benchmark/batch_latency": latency,
+                "benchmark/batch_tokens": batch_tokens,
+                "benchmark/batch_throughput": batch_tokens / latency if latency > 0 else 0,
+            }, step=(i // args.batch_size) + 1)
+        
     t_end_total = time.perf_counter()
     total_time = t_end_total - t_start_total
     overall_throughput = total_tokens / total_time if total_time > 0 else 0
@@ -93,6 +105,15 @@ def main():
     logger.info(f"Generated Tokens : {total_tokens}")
     logger.info(f"Avg Throughput   : {overall_throughput:.2f} tokens/sec")
     logger.info("=" * 60)
+
+    if tracker:
+        tracker.log({
+            "benchmark/total_time": total_time,
+            "benchmark/avg_latency": mean(latencies) if latencies else 0,
+            "benchmark/overall_throughput": overall_throughput,
+            "benchmark/total_tokens": total_tokens
+        }, step=len(prompts) // args.batch_size + 1)
+        tracker.finish()
 
 if __name__ == "__main__":
     main()

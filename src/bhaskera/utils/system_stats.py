@@ -138,9 +138,11 @@ def _gpu_metrics(now: float) -> dict[str, float]:
         logger.debug(f"nvmlDeviceGetCount failed: {e}")
         return out
 
-    out["gpu/count"] = float(n)
+    out["gpu/count"] = float(len(allowed_gpu_indices) if allowed_gpus else n)
 
     for i in range(n):
+        if i not in allowed_gpu_indices:
+            continue
         try:
             h = nvml.nvmlDeviceGetHandleByIndex(i)
         except Exception:
