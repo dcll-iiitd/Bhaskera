@@ -63,7 +63,7 @@ checkpoint:
   keep_last_n: 2
 
 logging:
-  tracker: null                      # wandb | mlflow | null
+  tracker: wandb                     # wandb | mlflow | null
   project: "bhaskera"
   run_name: "param2-lora"
   log_gpu_every_n_steps: 10
@@ -76,7 +76,7 @@ inference:
   do_sample: true
   batch_size: 1
   device: auto
-  kv_cache: turboquant
+  kv_cache: none
 
   turboquant:
     key_bits: 4

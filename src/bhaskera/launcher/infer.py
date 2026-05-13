@@ -233,6 +233,13 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
+    # ── Config ───────────────────────────────────────────────────────
+    cfg = _build_config(args)
+
+    # ── Logger ───────────────────────────────────────────────────────
+    from bhaskera.utils import build_logger
+    tracker = build_logger(cfg)
+
     # ── Apply backend override ────────────────────────────────────────
     if args.backend:
         os.environ["BHASKERA_BACKEND"] = args.backend
@@ -255,9 +262,6 @@ def main(argv: Optional[List[str]] = None) -> None:
         if not prompts:
             parser.error(f"No prompts found in {args.prompt_file}")
         logger.info(f"Loaded {len(prompts)} prompt(s) from {args.prompt_file}")
-
-    # ── Config ───────────────────────────────────────────────────────
-    cfg = _build_config(args)
 
     # ── Engine ───────────────────────────────────────────────────────
     from bhaskera.inference import InferenceEngine
@@ -298,7 +302,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         total_answer_tokens = sum(_count_tokens(o.final_answer) for o in outputs_raw)
         total_think_tokens  = sum(_count_tokens(o.reasoning)    for o in outputs_raw)
         total_tokens        = total_answer_tokens + total_think_tokens
-        _print_stats(elapsed, len(prompts), total_tokens, total_answer_tokens, total_think_tokens)
+        _print_stats(elapsed, len(prompts), total_tokens, total_answer_tokens, total_think_tokens, tracker)
 
         # File output
         if args.output_file:
@@ -326,7 +330,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             print(rendered)
 
         total_tokens = sum(_count_tokens(t) for t in outputs)
-        _print_stats(elapsed, len(prompts), total_tokens)
+        _print_stats(elapsed, len(prompts), total_tokens, tracker=tracker)
 
         if args.output_file:
             _write_output_file(args.output_file, outputs)
@@ -339,10 +343,19 @@ def main(argv: Optional[List[str]] = None) -> None:
             f"(bf16 baseline: {stats['bf16_mb']:.1f} MB, "
             f"ratio: {stats['compression_ratio']:.1f}×)"
         )
+        if tracker:
+            tracker.log({
+                "inference/kv_tq_mb": stats['tq_mb'],
+                "inference/kv_bf16_mb": stats['bf16_mb'],
+                "inference/kv_compression_ratio": stats['compression_ratio'],
+            }, step=1)
 
     # Thinking model note
     if is_thinking and not args.show_thinking and not args.param2:
         print("(Thinking/reasoning block hidden — use --show-thinking to display)")
+
+    if tracker:
+        tracker.finish()
 
 
 # ---------------------------------------------------------------------------
@@ -355,9 +368,16 @@ def _print_stats(
     total_tokens: int,
     answer_tokens: Optional[int] = None,
     thinking_tokens: Optional[int] = None,
+    tracker = None
 ) -> None:
     print(f"\n{SEP}")
     tps = total_tokens / elapsed if elapsed > 0 else 0.0
+    
+    metrics = {
+        "inference/elapsed_time": elapsed,
+        "inference/total_tokens": total_tokens,
+        "inference/tokens_per_sec": tps,
+    }
 
     if thinking_tokens and thinking_tokens > 0:
         ans_tps = (answer_tokens or 0) / elapsed if elapsed > 0 else 0.0
@@ -368,6 +388,11 @@ def _print_stats(
             f"\033[1;32m{ans_tps:.1f} answer tok/s\033[0m "
             f"({tps:.1f} total tok/s)"
         )
+        metrics.update({
+            "inference/answer_tokens": answer_tokens,
+            "inference/think_tokens": thinking_tokens,
+            "inference/answer_tokens_per_sec": ans_tps,
+        })
     else:
         print(
             f"Generated {n_prompts} response(s) | "
@@ -375,6 +400,9 @@ def _print_stats(
             f"{elapsed:.2f}s | "
             f"\033[1;32m{tps:.1f} tok/s\033[0m"
         )
+        
+    if tracker:
+        tracker.log(metrics, step=1)
 
 
 def _write_output_file(path: str, texts: List[str]) -> None:
