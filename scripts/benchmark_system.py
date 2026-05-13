@@ -3,6 +3,7 @@ import json
 import logging
 import time
 import requests
+import concurrent.futures
 from statistics import mean
 
 from bhaskera.config import load_config
@@ -22,6 +23,7 @@ def main():
     parser.add_argument("--max-samples", type=int, default=10, help="Max number of requests to evaluate")
     parser.add_argument("--batch-size", type=int, default=1, help="Requests per batch")
     parser.add_argument("--max-new-tokens", type=int, default=128, help="Max tokens per generation")
+    parser.add_argument("--concurrency", type=int, default=8, help="Number of concurrent requests")
     args = parser.parse_args()
 
     # 1. Fetch benchmark dataset
@@ -59,16 +61,11 @@ def main():
     total_tokens = 0
     t_start_total = time.perf_counter()
 
-    # 3. Execution Loop
-    for i in range(0, len(prompts), args.batch_size):
-        batch = prompts[i : i + args.batch_size]
-        
+    # Worker function for parallel execution
+    def run_inference(prompt):
         t0 = time.perf_counter()
-        
-        # Uses standard generation for stress testing load 
-        # (you could swap to generate_param2() if testing internal Param2 features)
         outputs = engine.generate(
-            batch, 
+            [prompt], 
             max_new_tokens=args.max_new_tokens,
             temperature=0.7,
             do_sample=True,
@@ -77,20 +74,37 @@ def main():
         t1 = time.perf_counter()
         
         latency = t1 - t0
-        latencies.append(latency)
+        tokens = count_tokens(outputs[0])
+        return latency, tokens
+
+    # 3. Execution Loop (Parallel)
+    logger.info(f"Running {len(prompts)} prompts with {args.concurrency} concurrent threads...")
+    completed = 0
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+        # Map prompts to futures
+        future_to_prompt = {executor.submit(run_inference, p): p for p in prompts}
         
-        batch_tokens = sum(count_tokens(out) for out in outputs)
-        total_tokens += batch_tokens
-            
-        logger.info(f"Batch {i//args.batch_size + 1}/{(len(prompts)+args.batch_size-1)//args.batch_size} processed in {latency:.2f}s ({batch_tokens} tokens)")
-        
-        if tracker:
-            tracker.log({
-                "benchmark/batch_latency": latency,
-                "benchmark/batch_tokens": batch_tokens,
-                "benchmark/batch_throughput": batch_tokens / latency if latency > 0 else 0,
-            }, step=(i // args.batch_size) + 1)
-        
+        for future in concurrent.futures.as_completed(future_to_prompt):
+            try:
+                latency, tokens = future.result()
+                latencies.append(latency)
+                total_tokens += tokens
+                
+                completed += 1
+                if completed % 10 == 0 or completed == len(prompts):
+                    logger.info(f"Completed {completed}/{len(prompts)} prompts...")
+                    
+                if tracker:
+                    tracker.log({
+                        "benchmark/request_latency": latency,
+                        "benchmark/request_tokens": tokens,
+                        "benchmark/request_throughput": tokens / latency if latency > 0 else 0,
+                    }, step=completed)
+                    
+            except Exception as exc:
+                logger.error(f"Generation generated an exception: {exc}")
+
     t_end_total = time.perf_counter()
     total_time = t_end_total - t_start_total
     overall_throughput = total_tokens / total_time if total_time > 0 else 0
@@ -112,7 +126,7 @@ def main():
             "benchmark/avg_latency": mean(latencies) if latencies else 0,
             "benchmark/overall_throughput": overall_throughput,
             "benchmark/total_tokens": total_tokens
-        }, step=len(prompts) // args.batch_size + 1)
+        }, step=len(prompts))
         tracker.finish()
 
 if __name__ == "__main__":
