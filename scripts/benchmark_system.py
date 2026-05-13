@@ -3,6 +3,7 @@ import json
 import logging
 import time
 import requests
+import threading
 import concurrent.futures
 from statistics import mean
 
@@ -60,9 +61,18 @@ def main():
     latencies = []
     total_tokens = 0
     t_start_total = time.perf_counter()
+    
+    # Tracking concurrency
+    active_requests = 0
+    lock = threading.Lock()
 
     # Worker function for parallel execution
     def run_inference(prompt):
+        nonlocal active_requests
+        with lock:
+            active_requests += 1
+            current_active = active_requests
+            
         t0 = time.perf_counter()
         outputs = engine.generate(
             [prompt], 
@@ -73,9 +83,12 @@ def main():
         )
         t1 = time.perf_counter()
         
+        with lock:
+            active_requests -= 1
+            
         latency = t1 - t0
         tokens = count_tokens(outputs[0])
-        return latency, tokens
+        return latency, tokens, current_active
 
     # 3. Execution Loop (Parallel)
     logger.info(f"Running {len(prompts)} prompts with {args.concurrency} concurrent threads...")
@@ -87,19 +100,20 @@ def main():
         
         for future in concurrent.futures.as_completed(future_to_prompt):
             try:
-                latency, tokens = future.result()
+                latency, tokens, concurrent_active = future.result()
                 latencies.append(latency)
                 total_tokens += tokens
                 
                 completed += 1
-                if completed % 10 == 0 or completed == len(prompts):
-                    logger.info(f"Completed {completed}/{len(prompts)} prompts...")
+                
+                logger.info(f"Completed {completed}/{len(prompts)} prompts... [Active threads: {active_requests}]")
                     
                 if tracker:
                     tracker.log({
                         "benchmark/request_latency": latency,
                         "benchmark/request_tokens": tokens,
                         "benchmark/request_throughput": tokens / latency if latency > 0 else 0,
+                        "benchmark/active_requests": concurrent_active,
                     }, step=completed)
                     
             except Exception as exc:
