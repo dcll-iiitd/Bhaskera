@@ -23,7 +23,7 @@ class ModelConfig:
     attn_impl: Optional[str] = None
     trust_remote_code: bool = False
     use_liger_kernel: bool = True
-
+    quantization: str = "none"
 
 @dataclass
 class LoraConfig:
@@ -291,6 +291,7 @@ def _dict_to_config(raw: dict) -> Config:
             attn_impl=model_raw.get("attn_impl"),
             trust_remote_code=model_raw.get("trust_remote_code", False),
             use_liger_kernel=bool(model_raw.get("use_liger_kernel", True)),
+            quantization=str(model_raw.get("quantization", "none")),
         ),
         data=DataConfig(
             name=data_raw.get("name", "ultrachat"),

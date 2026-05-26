@@ -15,7 +15,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from bhaskera.introspect import ModelProfile, introspect_model
-
+from bhaskera.models.quantization import build_quantization_config
 logger = logging.getLogger(__name__)
 
 _DTYPE_MAP = {
@@ -117,6 +117,13 @@ def build_model(cfg, device: torch.device) -> Tuple[torch.nn.Module, ModelProfil
         # output_router_logits here.  Truncation to seq_len is the
         # tokenizer's job, and router logits are requested per-forward
         # by the training loop when MoE aux loss is needed.
+        quant_cfg = build_quantization_config(cfg)
+        if quant_cfg is not None:
+            strategy = getattr(getattr(cfg, "training", None) and cfg.training.distributed,"strategy","fsdp",)
+            if strategy == "fsdp":
+                raise ValueError("QLoRA (model.quantization=qlora) is not compatible with FSDP2. "
+                        "Set training.distributed.strategy: ddp, or disable quantization.")
+            kwargs["quantization_config"] = quant_cfg
         model = AutoModelForCausalLM.from_pretrained(
             name, config=model_config, **kwargs
         )
