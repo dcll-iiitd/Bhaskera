@@ -4,7 +4,7 @@
 # Run:      bhaskera-serve --config configs/serve-thinking.yaml
 
 model:
-  name: "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+  name: "aaditya/Llama3-OpenBioLLM-8B"
   dtype: "bfloat16"
 
 serve:
@@ -17,10 +17,10 @@ serve:
   vllm:
     tensor_parallel_size: 1
     gpu_memory_utilization: 0.92
-    max_model_len: 32768           # must fit prompt + full thinking chain
+    max_model_len: 8192           # must fit prompt + full thinking chain
 
 inference:
-  max_new_tokens: 16384            # <-- critical: thinking chain eats tokens fast
+  max_new_tokens: 256            # <-- critical: thinking chain eats tokens fast
   temperature: 0.6                 # recommended for R1-class models
   top_p: 0.95
   do_sample: true
