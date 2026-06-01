@@ -38,16 +38,33 @@ flash     = ["flash-attn>=2.5"]
 dev       = ["pytest>=7", "ruff>=0.4"]
 inference = ["scipy>=1.10"]
 
+# ── Serving stack ──────────────────────────────────────────────────────────
+# Minimum deps for bhaskera-serve (both HF and vLLM backends).
+# ray[serve] is listed separately so that training-only installs
+# don't pull in the full Serve runtime.
+serve = [
+    "ray[serve]>=2.10",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.5",
+]
+# Fast-path vLLM backend. Install on top of [serve]:
+#   pip install "bhaskera[serve,vllm]"
+vllm = ["vllm>=0.4.3"]
+
 # Convenience meta-extra: install everything needed for the full
 # observability stack (Ray Dashboard already comes with default).
 observability = ["wandb>=0.16", "mlflow>=2.10"]
 
 [project.scripts]
-bhaskera-train    = "bhaskera.launcher.train:main"
-bhaskera-diag     = "bhaskera.launcher.diagnostics:main"
-bhaskera-infer    = "bhaskera.launcher.infer:main"
-bhaskera-tokenize = "bhaskera.launcher.tokenize:main"   # fix #28
+bhaskera-train     = "bhaskera.launcher.train:main"
+bhaskera-diag      = "bhaskera.launcher.diagnostics:main"
+bhaskera-infer     = "bhaskera.launcher.infer:main"
+bhaskera-tokenize  = "bhaskera.launcher.tokenize:main"
 bhaskera-dashboard = "bhaskera.launcher.dashboard:main"
+# ── new ───────────────────────────────────────────────────────────────────
+bhaskera-serve     = "bhaskera.launcher.serve:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

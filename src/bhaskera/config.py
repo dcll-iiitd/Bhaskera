@@ -45,6 +45,71 @@ class MoEConfig:
     log_expert_utilization: bool = True
     log_every_n_steps: int = 10
 
+@dataclass
+class ServeBackendVLLMConfig:
+    """vLLM AsyncLLMEngine tuning knobs."""
+    tensor_parallel_size: int   = 1
+    gpu_memory_utilization: float = 0.90
+    max_model_len: Optional[int] = None      # None → use model default
+    dtype: str                  = "auto"     # "auto" | "float16" | "bfloat16"
+    enforce_eager: bool         = False      # disable CUDA graph capture
+
+@dataclass
+class ServeBackendHFConfig:
+    """HF fallback-backend options."""
+    max_batch_size: int         = 8
+    device: str                 = "auto"     # "auto" | "cuda:0" | "cpu"
+    # Serialize HF generation so the (non-thread-safe) model isn't called
+    # concurrently within one replica.  Scale with num_replicas instead.
+    max_concurrent_queries: int = 1
+
+
+@dataclass
+class ServeConfig:
+    """
+    Top-level config for bhaskera-serve.
+
+    Minimal YAML example::
+
+        serve:
+          backend: vllm          # "vllm" | "hf"
+          host: "0.0.0.0"
+          port: 8000
+          num_replicas: 2
+          ray_actor_options:
+            num_gpus: 1
+
+          vllm:
+            tensor_parallel_size: 1
+            gpu_memory_utilization: 0.90
+
+          hf:
+            device: "cuda:0"
+    """
+    enabled:   bool = False
+    backend:   str  = "hf"          # "vllm" | "hf"
+    host:      str  = "0.0.0.0"
+    port:      int  = 8000
+    route_prefix: str = "/"
+    num_replicas: int = 1
+
+    # Ray autoscaling (optional). Both must be set to activate.
+    autoscaling_min_replicas: Optional[int] = None
+    autoscaling_max_replicas: Optional[int] = None
+
+    # Ray actor resource spec for each replica.
+    # For vLLM set num_gpus ≥ tensor_parallel_size.
+    # For HF CPU-only set num_gpus: 0.
+    ray_actor_options: dict = field(
+        default_factory=lambda: {"num_gpus": 1}
+    )
+
+    vllm: ServeBackendVLLMConfig = field(
+        default_factory=ServeBackendVLLMConfig
+    )
+    hf: ServeBackendHFConfig = field(
+        default_factory=ServeBackendHFConfig
+    )
 
 @dataclass
 class TurboQuantConfig:
@@ -241,6 +306,7 @@ class Config:
     logging: LoggingConfig        = field(default_factory=LoggingConfig)
     inference: InferenceConfig    = field(default_factory=InferenceConfig)
     monitoring: MonitoringConfig  = field(default_factory=MonitoringConfig)
+    serve: ServeConfig = field(default_factory=ServeConfig)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -283,6 +349,9 @@ def _dict_to_config(raw: dict) -> Config:
     prom_raw    = _get(raw, "monitoring", "prometheus", default={}) or {}
     graf_raw    = _get(raw, "monitoring", "grafana",    default={}) or {}
     metrics_raw = _get(raw, "monitoring", "metrics",    default={}) or {}
+    serve_raw = _get(raw, "serve",        default={}) or {}
+    vllm_raw  = _get(raw, "serve", "vllm", default={}) or {}
+    hf_raw    = _get(raw, "serve", "hf",   default={}) or {}
 
     return Config(
         model=ModelConfig(
@@ -428,6 +497,32 @@ def _dict_to_config(raw: dict) -> Config:
                 throughput_warmup=int(metrics_raw.get("throughput_warmup", 5)),
             ),
         ),
+        serve=ServeConfig(
+         enabled=bool(serve_raw.get("enabled", False)),
+         backend=str(serve_raw.get("backend", "hf")),
+         host=str(serve_raw.get("host", "0.0.0.0")),
+         port=int(serve_raw.get("port", 8000)),
+         route_prefix=str(serve_raw.get("route_prefix", "/")),
+         num_replicas=int(serve_raw.get("num_replicas", 1)),
+         autoscaling_min_replicas=serve_raw.get("autoscaling_min_replicas"),
+         autoscaling_max_replicas=serve_raw.get("autoscaling_max_replicas"),
+         ray_actor_options=dict(
+             serve_raw.get("ray_actor_options", {"num_gpus": 1}) or {"num_gpus": 1}
+         ),
+         vllm=ServeBackendVLLMConfig(
+             tensor_parallel_size=int(vllm_raw.get("tensor_parallel_size", 1)),
+             gpu_memory_utilization=float(vllm_raw.get("gpu_memory_utilization", 0.90)),
+             max_model_len=vllm_raw.get("max_model_len"),
+             dtype=str(vllm_raw.get("dtype", "auto")),
+             enforce_eager=bool(vllm_raw.get("enforce_eager", False)),
+         ),
+         hf=ServeBackendHFConfig(
+             max_batch_size=int(hf_raw.get("max_batch_size", 8)),
+             device=str(hf_raw.get("device", "auto")),
+             max_concurrent_queries=int(hf_raw.get("max_concurrent_queries", 1)),
+         ),
+     ),
+
     )
 
 
