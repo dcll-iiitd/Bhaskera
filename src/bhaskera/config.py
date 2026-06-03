@@ -1,20 +1,9 @@
-"""
-Bhaskera config — single source of truth.
-
-
-
-"""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional, Union
 
 import yaml
-
-
-# ---------------------------------------------------------------------------
-# Sub-configs
-# ---------------------------------------------------------------------------
 
 @dataclass
 class ModelConfig:
@@ -36,7 +25,6 @@ class LoraConfig:
     freeze_router: bool = True
     modules_to_save: list[str] = field(default_factory=list)
 
-
 @dataclass
 class MoEConfig:
     aux_loss_weight: float = 0.01
@@ -47,69 +35,40 @@ class MoEConfig:
 
 @dataclass
 class ServeBackendVLLMConfig:
-    """vLLM AsyncLLMEngine tuning knobs."""
     tensor_parallel_size: int   = 1
     gpu_memory_utilization: float = 0.90
-    max_model_len: Optional[int] = None      # None → use model default
-    dtype: str                  = "auto"     # "auto" | "float16" | "bfloat16"
-    enforce_eager: bool         = False      # disable CUDA graph capture
+    max_model_len: Optional[int] = None
+    dtype: str                  = "auto"
+    enforce_eager: bool         = False
 
 @dataclass
 class ServeBackendHFConfig:
-    """HF fallback-backend options."""
     max_batch_size: int         = 8
-    device: str                 = "auto"     # "auto" | "cuda:0" | "cpu"
-    # Serialize HF generation so the (non-thread-safe) model isn't called
-    # concurrently within one replica.  Scale with num_replicas instead.
+    device: str                 = "auto"
     max_concurrent_queries: int = 1
 
+@dataclass
+class GatewayConfig:
+    enabled: bool = False
+    proxy_port: int = 0
+    cloudflared: bool = True
 
 @dataclass
 class ServeConfig:
-    """
-    Top-level config for bhaskera-serve.
-
-    Minimal YAML example::
-
-        serve:
-          backend: vllm          # "vllm" | "hf"
-          host: "0.0.0.0"
-          port: 8000
-          num_replicas: 2
-          ray_actor_options:
-            num_gpus: 1
-
-          vllm:
-            tensor_parallel_size: 1
-            gpu_memory_utilization: 0.90
-
-          hf:
-            device: "cuda:0"
-    """
     enabled:   bool = False
-    backend:   str  = "hf"          # "vllm" | "hf"
+    backend:   str  = "hf"
     host:      str  = "0.0.0.0"
     port:      int  = 8000
     route_prefix: str = "/"
     num_replicas: int = 1
-
-    # Ray autoscaling (optional). Both must be set to activate.
     autoscaling_min_replicas: Optional[int] = None
     autoscaling_max_replicas: Optional[int] = None
-
-    # Ray actor resource spec for each replica.
-    # For vLLM set num_gpus ≥ tensor_parallel_size.
-    # For HF CPU-only set num_gpus: 0.
     ray_actor_options: dict = field(
         default_factory=lambda: {"num_gpus": 1}
     )
-
-    vllm: ServeBackendVLLMConfig = field(
-        default_factory=ServeBackendVLLMConfig
-    )
-    hf: ServeBackendHFConfig = field(
-        default_factory=ServeBackendHFConfig
-    )
+    vllm: ServeBackendVLLMConfig = field(default_factory=ServeBackendVLLMConfig)
+    hf: ServeBackendHFConfig = field(default_factory=ServeBackendHFConfig)
+    gateway: GatewayConfig = field(default_factory=GatewayConfig)
 
 @dataclass
 class TurboQuantConfig:
@@ -119,13 +78,11 @@ class TurboQuantConfig:
     residual_window: int = 128
     protected_layers: int = 2
 
-
 @dataclass
 class SpeculativeConfig:
     enabled: bool = False
     draft_model_name: str = ""
     num_draft_tokens: int = 5
-
 
 @dataclass
 class InferenceConfig:
@@ -141,45 +98,25 @@ class InferenceConfig:
     turboquant: TurboQuantConfig = field(default_factory=TurboQuantConfig)
     speculative: SpeculativeConfig = field(default_factory=SpeculativeConfig)
 
-
 @dataclass
 class DataConfig:
     name: str = "ultrachat"
     seq_len: int = 2048
     num_workers: int = 4
-
-    # ── Phase 1: persistent-cache plumbing ─────────────────────────────────
     tokenized_path: Optional[str] = None
     cache_dir: Optional[str] = None
     overwrite_cache: bool = False
     tokenize_batch_size: int = 128
-    tokenize_compression: str = "snappy"     # snappy | zstd | none
+    tokenize_compression: str = "snappy"
     prefetch_batches: int = 2
     local_shuffle_buffer_multiplier: int = 10
     pack_sequences: bool = False
-
-    # ── Phase 2: chat-format / local-files plumbing ────────────────────────
-    # Name of a registered format renderer (chatml, alpaca, sharegpt, or
-    # whatever you @register_format yourself). When set, TokenizerActor
-    # renders each row to a single string before tokenising.
     format: Optional[str] = None
-    # Free-form dict passed to the renderer. Hashed into the cache key,
-    # so changing it triggers a re-tokenize automatically.
     format_options: dict = field(default_factory=dict)
-
-    # Local data sources (used by the "local" dataset and the tokenize CLI).
-    # Each may be a single file, a directory, or a glob pattern.
-    path: Optional[str] = None        # single-source shorthand (used as train)
+    path: Optional[str] = None
     train_path: Optional[str] = None
     val_path: Optional[str] = None
-
-    # Optional pre-tokenized validation set, populated by bhaskera-tokenize
-    # when run with --split both. Loaded by the trainer alongside
-    # tokenized_path. (Wire this into your training loop where it makes
-    # sense — see launcher/train.py.)
     val_tokenized_path: Optional[str] = None
-
-
 
 @dataclass
 class FSDPConfig:
@@ -192,38 +129,19 @@ class FSDPConfig:
     cpu_offload: bool = False
     shard_experts_individually: bool = True
 
-
 @dataclass
 class DDPConfig:
     find_unused_parameters: bool = False
     gradient_as_bucket_view: bool = True
     broadcast_buffers: bool = False
-
-    # ── DDP-parity additions ───────────────────────────────────────────────
-    # Activation checkpointing under DDP. Identical mechanism to FSDP's AC
-    # (same activation_ckpt.apply_activation_checkpointing call), but applied
-    # to the raw module BEFORE the DDP wrap so DDP's parameter-graph snapshot
-    # sees the checkpoint-wrapped modules.
-    # Works for both dense (decoder-layer granularity) and MoE
-    # (per-expert granularity), driven off the ModelProfile from
-    # introspect.py — no hardcoded layer names.
     activation_checkpointing: bool = False
-
-    # DDP static_graph optimisation. When True, DDP caches the autograd
-    # reduction order from iteration 1 and reuses it, enabling extra
-    # bucketing optimisations. NOTE: mutually exclusive with
-    # find_unused_parameters=True (DDP itself enforces this) and with
-    # manual grad-sync toggling for grad accumulation. The training loop
-    # detects static_graph and falls back to per-micro-step all-reduces.
     static_graph: bool = False
-
 
 @dataclass
 class DistributedConfig:
     strategy: str = "fsdp"
     fsdp: FSDPConfig = field(default_factory=FSDPConfig)
     ddp: DDPConfig = field(default_factory=DDPConfig)
-
 
 @dataclass
 class TrainingConfig:
@@ -237,10 +155,9 @@ class TrainingConfig:
     max_grad_norm: float = 1.0
     seed: int = 42
     deterministic: bool = False
-    grad_clip: Optional[float] = 1.0          # Phase 1: used by no_sync loop
+    grad_clip: Optional[float] = 1.0
     max_grad_skip_steps: int = 100
     distributed: DistributedConfig = field(default_factory=DistributedConfig)
-
 
 @dataclass
 class CheckpointConfig:
@@ -249,10 +166,8 @@ class CheckpointConfig:
     save_interval: int = 1
     keep_last_n: int = 2
 
-
 @dataclass
 class LoggingConfig:
-    # str | list[str] | None — see _normalize_trackers in loggers/__init__
     tracker: Optional[Union[str, list]] = None
     project: str = "bhaskera"
     run_name: str = "run"
@@ -261,15 +176,8 @@ class LoggingConfig:
     tags: list[str] = field(default_factory=list)
     group: Optional[str] = None
 
-
-# ── Monitoring sub-configs ────────────────────────────────────────────────
-
-
-
-
 @dataclass
 class MetricsConfig:
-    """Per-step custom-metric toggles."""
     enabled: bool = True
     system_every_n_steps: int = 10
     cuda_every_n_steps: int = 10
@@ -283,17 +191,11 @@ class MetricsConfig:
 
 @dataclass
 class MonitoringConfig:
-    """Ray Dashboard + per-step metrics (MLflow handles experiment tracking)."""
     dashboard:           bool          = True
     dashboard_host:      str           = "0.0.0.0"
     dashboard_port:      int           = 8265
     metrics_export_port: int           = 8080
     metrics:             MetricsConfig = field(default_factory=MetricsConfig)
-
-
-# ---------------------------------------------------------------------------
-# Root config
-# ---------------------------------------------------------------------------
 
 @dataclass
 class Config:
@@ -306,7 +208,7 @@ class Config:
     logging: LoggingConfig        = field(default_factory=LoggingConfig)
     inference: InferenceConfig    = field(default_factory=InferenceConfig)
     monitoring: MonitoringConfig  = field(default_factory=MonitoringConfig)
-    serve: ServeConfig = field(default_factory=ServeConfig)
+    serve: ServeConfig            = field(default_factory=ServeConfig)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -314,11 +216,6 @@ class Config:
     @classmethod
     def from_dict(cls, d: dict) -> "Config":
         return _dict_to_config(d or {})
-
-
-# ---------------------------------------------------------------------------
-# Loader
-# ---------------------------------------------------------------------------
 
 def _get(d: Any, *keys, default=None):
     for k in keys:
@@ -328,7 +225,6 @@ def _get(d: Any, *keys, default=None):
         if d is default:
             return default
     return d
-
 
 def _dict_to_config(raw: dict) -> Config:
     fsdp_raw    = _get(raw, "training", "distributed", "fsdp", default={}) or {}
@@ -344,14 +240,12 @@ def _dict_to_config(raw: dict) -> Config:
     infer_raw   = _get(raw, "inference", default={}) or {}
     tq_raw      = _get(raw, "inference", "turboquant", default={}) or {}
     spec_raw    = _get(raw, "inference", "speculative", default={}) or {}
-
     mon_raw     = _get(raw, "monitoring", default={}) or {}
-    prom_raw    = _get(raw, "monitoring", "prometheus", default={}) or {}
-    graf_raw    = _get(raw, "monitoring", "grafana",    default={}) or {}
     metrics_raw = _get(raw, "monitoring", "metrics",    default={}) or {}
-    serve_raw = _get(raw, "serve",        default={}) or {}
-    vllm_raw  = _get(raw, "serve", "vllm", default={}) or {}
-    hf_raw    = _get(raw, "serve", "hf",   default={}) or {}
+    serve_raw   = _get(raw, "serve",        default={}) or {}
+    vllm_raw    = _get(raw, "serve", "vllm", default={}) or {}
+    hf_raw      = _get(raw, "serve", "hf",   default={}) or {}
+    gw_raw      = _get(raw, "serve", "gateway", default={}) or {}
 
     return Config(
         model=ModelConfig(
@@ -366,20 +260,14 @@ def _dict_to_config(raw: dict) -> Config:
             name=data_raw.get("name", "ultrachat"),
             seq_len=int(data_raw.get("seq_len", 2048)),
             num_workers=int(data_raw.get("num_workers", 4)),
-
-            # Phase 1
             tokenized_path=data_raw.get("tokenized_path"),
             cache_dir=data_raw.get("cache_dir"),
             overwrite_cache=bool(data_raw.get("overwrite_cache", False)),
             tokenize_batch_size=int(data_raw.get("tokenize_batch_size", 128)),
             tokenize_compression=str(data_raw.get("tokenize_compression", "snappy")),
             prefetch_batches=int(data_raw.get("prefetch_batches", 2)),
-            local_shuffle_buffer_multiplier=int(
-                data_raw.get("local_shuffle_buffer_multiplier", 10)
-            ),
+            local_shuffle_buffer_multiplier=int(data_raw.get("local_shuffle_buffer_multiplier", 10)),
             pack_sequences=bool(data_raw.get("pack_sequences", False)),
-
-            # Phase 2
             format=data_raw.get("format"),
             format_options=dict(data_raw.get("format_options", {}) or {}),
             path=data_raw.get("path"),
@@ -427,15 +315,12 @@ def _dict_to_config(raw: dict) -> Config:
                     buffer_dtype=fsdp_raw.get("buffer_dtype", "bfloat16"),
                     activation_checkpointing=bool(fsdp_raw.get("activation_checkpointing", True)),
                     cpu_offload=bool(fsdp_raw.get("cpu_offload", False)),
-                    shard_experts_individually=bool(
-                        fsdp_raw.get("shard_experts_individually", True)
-                    ),
+                    shard_experts_individually=bool(fsdp_raw.get("shard_experts_individually", True)),
                 ),
                 ddp=DDPConfig(
                     find_unused_parameters=bool(ddp_raw.get("find_unused_parameters", False)),
                     gradient_as_bucket_view=bool(ddp_raw.get("gradient_as_bucket_view", True)),
                     broadcast_buffers=bool(ddp_raw.get("broadcast_buffers", False)),
-                    # ── DDP-parity additions ──
                     activation_checkpointing=bool(ddp_raw.get("activation_checkpointing", False)),
                     static_graph=bool(ddp_raw.get("static_graph", False)),
                 ),
@@ -498,33 +383,36 @@ def _dict_to_config(raw: dict) -> Config:
             ),
         ),
         serve=ServeConfig(
-         enabled=bool(serve_raw.get("enabled", False)),
-         backend=str(serve_raw.get("backend", "hf")),
-         host=str(serve_raw.get("host", "0.0.0.0")),
-         port=int(serve_raw.get("port", 8000)),
-         route_prefix=str(serve_raw.get("route_prefix", "/")),
-         num_replicas=int(serve_raw.get("num_replicas", 1)),
-         autoscaling_min_replicas=serve_raw.get("autoscaling_min_replicas"),
-         autoscaling_max_replicas=serve_raw.get("autoscaling_max_replicas"),
-         ray_actor_options=dict(
-             serve_raw.get("ray_actor_options", {"num_gpus": 1}) or {"num_gpus": 1}
-         ),
-         vllm=ServeBackendVLLMConfig(
-             tensor_parallel_size=int(vllm_raw.get("tensor_parallel_size", 1)),
-             gpu_memory_utilization=float(vllm_raw.get("gpu_memory_utilization", 0.90)),
-             max_model_len=vllm_raw.get("max_model_len"),
-             dtype=str(vllm_raw.get("dtype", "auto")),
-             enforce_eager=bool(vllm_raw.get("enforce_eager", False)),
-         ),
-         hf=ServeBackendHFConfig(
-             max_batch_size=int(hf_raw.get("max_batch_size", 8)),
-             device=str(hf_raw.get("device", "auto")),
-             max_concurrent_queries=int(hf_raw.get("max_concurrent_queries", 1)),
-         ),
-     ),
-
+            enabled=bool(serve_raw.get("enabled", False)),
+            backend=str(serve_raw.get("backend", "hf")),
+            host=str(serve_raw.get("host", "0.0.0.0")),
+            port=int(serve_raw.get("port", 8000)),
+            route_prefix=str(serve_raw.get("route_prefix", "/")),
+            num_replicas=int(serve_raw.get("num_replicas", 1)),
+            autoscaling_min_replicas=serve_raw.get("autoscaling_min_replicas"),
+            autoscaling_max_replicas=serve_raw.get("autoscaling_max_replicas"),
+            ray_actor_options=dict(
+                serve_raw.get("ray_actor_options", {"num_gpus": 1}) or {"num_gpus": 1}
+            ),
+            vllm=ServeBackendVLLMConfig(
+                tensor_parallel_size=int(vllm_raw.get("tensor_parallel_size", 1)),
+                gpu_memory_utilization=float(vllm_raw.get("gpu_memory_utilization", 0.90)),
+                max_model_len=vllm_raw.get("max_model_len"),
+                dtype=str(vllm_raw.get("dtype", "auto")),
+                enforce_eager=bool(vllm_raw.get("enforce_eager", False)),
+            ),
+            hf=ServeBackendHFConfig(
+                max_batch_size=int(hf_raw.get("max_batch_size", 8)),
+                device=str(hf_raw.get("device", "auto")),
+                max_concurrent_queries=int(hf_raw.get("max_concurrent_queries", 1)),
+            ),
+            gateway=GatewayConfig(
+                enabled=bool(gw_raw.get("enabled", False)),
+                proxy_port=int(gw_raw.get("proxy_port", 0)),
+                cloudflared=bool(gw_raw.get("cloudflared", True)),
+            ),
+        ),
     )
-
 
 def load_config(path: str) -> Config:
     with open(path) as f:

@@ -2,45 +2,6 @@
 bhaskera-serve
 ==============
 CLI entry point for the Bhaskera LLM serving stack.
-
-Reads a YAML config, initialises Ray, starts Ray Serve's HTTP server,
-deploys ``LLMDeployment``, then blocks until the process receives
-SIGINT or SIGTERM.
-
-Usage examples::
-
-    # Serve using config defaults (HF backend)
-    bhaskera-serve --config configs/serve.yaml
-
-    # Override backend and port at the command line
-    bhaskera-serve --config configs/serve.yaml --backend vllm --port 8080
-
-    # Connect to an existing Ray cluster
-    bhaskera-serve --config configs/serve.yaml --ray-address ray://head:10001
-
-    # Local single-node cluster (useful for development)
-    bhaskera-serve --config configs/serve.yaml --ray-address local
-
-Minimal YAML (``configs/serve.yaml``)::
-
-    model:
-      name: "meta-llama/Llama-3.1-8B-Instruct"
-      dtype: "bfloat16"
-      attn_impl: "flash_attention_2"
-
-    serve:
-      backend: "vllm"
-      host: "0.0.0.0"
-      port: 8000
-      num_replicas: 1
-      ray_actor_options:
-        num_gpus: 1
-      vllm:
-        tensor_parallel_size: 1
-        gpu_memory_utilization: 0.90
-
-    inference:
-      max_new_tokens: 512
 """
 from __future__ import annotations
 
@@ -49,13 +10,34 @@ import logging
 import signal
 import sys
 import time
+import socket
+import subprocess
+import threading
+import re
+import os
 
 logger = logging.getLogger(__name__)
 
+_active_processes = []
 
-# ---------------------------------------------------------------------------
-# CLI argument parser
-# ---------------------------------------------------------------------------
+def get_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+def _shutdown_subprocesses():
+    for p in _active_processes:
+        if p.poll() is None:
+            p.terminate()
+
+def monitor_cloudflared(proc):
+    for line in proc.stderr:
+        match = re.search(r"https://[-a-zA-Z0-9]+\.trycloudflare\.com", line)
+        if match:
+            logger.info("=" * 60)
+            logger.info("🌍 PUBLIC GATEWAY URL (Cloudflare):")
+            logger.info("   %s", match.group(0))
+            logger.info("=" * 60)
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -72,7 +54,6 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Path to the YAML configuration file.",
     )
-    # ── CLI overrides (all optional) ────────────────────────────────────
     p.add_argument(
         "--host",
         default=None,
@@ -99,7 +80,6 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="Override cfg.serve.num_replicas.",
     )
-    # ── Ray cluster ─────────────────────────────────────────────────────
     p.add_argument(
         "--ray-address",
         default="auto",
@@ -119,34 +99,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     return p
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args   = parser.parse_args(argv)
 
-    # ── Logging setup ───────────────────────────────────────────────────
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    # Quieten noisy third-party loggers at WARNING unless the user asked
-    # for DEBUG.
     if args.log_level != "DEBUG":
-        for noisy in ("ray", "ray.serve", "urllib3", "filelock", "transformers"):
+        for noisy in ("ray", "ray.serve", "urllib3", "filelock", "transformers", "uvicorn", "langfuse"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
 
-    # ── Load config ──────────────────────────────────────────────────────
     logger.info("Loading config from %s …", args.config)
     from bhaskera.config import load_config
 
     cfg = load_config(args.config)
 
-    # Apply CLI overrides (take precedence over YAML values).
     if args.host is not None:
         cfg.serve.host = args.host
     if args.port is not None:
@@ -156,9 +126,15 @@ def main(argv: list[str] | None = None) -> None:
     if args.num_replicas is not None:
         cfg.serve.num_replicas = args.num_replicas
 
+    if cfg.serve.port == 0:
+        cfg.serve.port = get_free_port()
+        
+    proxy_port = cfg.serve.gateway.proxy_port
+    if cfg.serve.gateway.enabled and proxy_port == 0:
+        proxy_port = get_free_port()
+
     _log_startup_banner(cfg)
 
-    # ── Validate ─────────────────────────────────────────────────────────
     if cfg.serve.backend not in ("vllm", "hf"):
         logger.error(
             "cfg.serve.backend must be 'vllm' or 'hf', got %r",
@@ -166,7 +142,6 @@ def main(argv: list[str] | None = None) -> None:
         )
         sys.exit(1)
 
-    # ── Initialise Ray ───────────────────────────────────────────────────
     import ray
 
     ray_address: str | None = (
@@ -181,17 +156,12 @@ def main(argv: list[str] | None = None) -> None:
         address=ray_address,
         ignore_reinit_error=True,
         logging_level=logging.WARNING,
-        # Surface runtime errors immediately rather than silently retrying.
         runtime_env={"env_vars": {"RAY_SERVE_HTTP_PROXY_TIMEOUT_S": "600"}},
     )
     logger.info("Ray resources: %s", ray.available_resources())
 
-    # ── Start Ray Serve ──────────────────────────────────────────────────
     from ray import serve
 
-    # ``serve.start()`` is idempotent when detached=True — safe to call
-    # even if another bhaskera-serve process already initialised Serve on
-    # this cluster.
     serve.start(
         detached=True,
         http_options={
@@ -200,7 +170,6 @@ def main(argv: list[str] | None = None) -> None:
         },
     )
 
-    # ── Build and deploy the application ─────────────────────────────────
     logger.info("Building application …")
     from bhaskera.serve.app import build_app
 
@@ -212,22 +181,52 @@ def main(argv: list[str] | None = None) -> None:
         route_prefix=cfg.serve.route_prefix,
         name="bhaskera_llm",
     )
+    
+    if cfg.serve.gateway.enabled:
+        logger.info("Starting Custom Langfuse Gateway on port %d...", proxy_port)
+        
+        # Inject the internal Ray port into the environment so Uvicorn can find it
+        env = os.environ.copy()
+        env["RAY_PORT"] = str(cfg.serve.port)
+        
+        # Launch Uvicorn
+        uvicorn_cmd = [
+            sys.executable, "-m", "uvicorn", 
+            "bhaskera.gateway:app", 
+            "--host", "127.0.0.1",
+            "--port", str(proxy_port)
+        ]
+        
+        p_gateway = subprocess.Popen(uvicorn_cmd, env=env)
+        _active_processes.append(p_gateway)
+        
+        if cfg.serve.gateway.cloudflared:
+            logger.info("Starting Cloudflare Tunnel...")
+            cf_cmd = [
+                "./cloudflared", "tunnel", "--url", f"http://127.0.0.1:{proxy_port}"
+            ]
+            
+            p_cf = subprocess.Popen(
+                cf_cmd, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE, 
+                text=True
+            )
+            _active_processes.append(p_cf)
+            threading.Thread(target=monitor_cloudflared, args=(p_cf,), daemon=True).start()
 
-    # ── Ready ─────────────────────────────────────────────────────────────
-    base_url = f"http://{cfg.serve.host}:{cfg.serve.port}"
     logger.info("=" * 60)
-    logger.info("  Bhaskera LLM API is live")
-    logger.info("  Chat:    %s/v1/chat/completions", base_url)
-    logger.info("  Models:  %s/v1/models", base_url)
-    logger.info("  Health:  %s/health", base_url)
-    logger.info("  Docs:    %s/docs", base_url)
+    logger.info("  Bhaskera Engine (Internal) is live")
+    logger.info("  Port:    %d", cfg.serve.port)
+    if cfg.serve.gateway.enabled:
+        logger.info("  Langfuse Gateway is live on port %d", proxy_port)
     logger.info("=" * 60)
     logger.info("Press Ctrl+C to stop.")
 
-    # ── Block until signal ───────────────────────────────────────────────
     def _shutdown(sig: int, _frame) -> None:
         sig_name = signal.Signals(sig).name
         logger.info("Received %s — shutting down …", sig_name)
+        _shutdown_subprocesses()
         try:
             serve.shutdown()
         except Exception:
@@ -245,15 +244,9 @@ def main(argv: list[str] | None = None) -> None:
     while True:
         time.sleep(1)
 
-
-# ---------------------------------------------------------------------------
-# Banner helper
-# ---------------------------------------------------------------------------
-
 def _log_startup_banner(cfg) -> None:
     logger.info(
-        "bhaskera-serve | model=%s backend=%s replicas=%d "
-        "http://%s:%d%s",
+        "bhaskera-serve | model=%s backend=%s replicas=%d http://%s:%d%s",
         cfg.model.name,
         cfg.serve.backend,
         cfg.serve.num_replicas,
@@ -261,22 +254,6 @@ def _log_startup_banner(cfg) -> None:
         cfg.serve.port,
         cfg.serve.route_prefix,
     )
-    if cfg.serve.backend == "vllm":
-        logger.info(
-            "  vLLM | tp=%d gpu_util=%.0f%% max_model_len=%s",
-            cfg.serve.vllm.tensor_parallel_size,
-            cfg.serve.vllm.gpu_memory_utilization * 100,
-            cfg.serve.vllm.max_model_len or "auto",
-        )
-    else:
-        logger.info(
-            "  HF   | device=%s max_concurrent_queries=%d",
-            cfg.serve.hf.device,
-            cfg.serve.hf.max_concurrent_queries,
-        )
-    if cfg.lora.enabled:
-        logger.info("  LoRA enabled (r=%d alpha=%d)", cfg.lora.r, cfg.lora.alpha)
-
 
 if __name__ == "__main__":
     main()

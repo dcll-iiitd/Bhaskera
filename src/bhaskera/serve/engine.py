@@ -31,7 +31,7 @@ import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, AsyncGenerator, Optional
-
+import os
 import torch
 from transformers import AutoTokenizer
 
@@ -43,7 +43,8 @@ logger = logging.getLogger(__name__)
 # Sentinel value used to signal end of a generator without relying on
 # StopIteration propagation through asyncio coroutines.
 _SENTINEL = object()
-
+os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+os.environ["VLLM_USE_FLASHINFER"] = "0"
 
 # ---------------------------------------------------------------------------
 # Generation parameters
@@ -143,6 +144,7 @@ class VLLMEngineWrapper(BaseEngine):
             dtype=vc.dtype,
             trust_remote_code=cfg.model.trust_remote_code,
             enforce_eager=vc.enforce_eager,
+            attention_backend="TRITON_ATTN",
         )
         self._engine = AsyncLLMEngine.from_engine_args(engine_args)
 

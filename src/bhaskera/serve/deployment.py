@@ -135,7 +135,7 @@ class LLMDeployment:
         )
 
     # ------------------------------------------------------------------ #
-    # Internal helpers                                                     #
+    # Internal helpers                                                   #
     # ------------------------------------------------------------------ #
 
     def _format_prompt(self, request: ChatCompletionRequest) -> str:
@@ -143,7 +143,7 @@ class LLMDeployment:
         Convert the ``messages`` list to a single prompt string using the
         tokenizer's chat template.
 
-        Falls back to a plain ``<role>\\ncontent</role>`` format when the
+        Falls back to a plain ``<role>\ncontent</role>`` format when the
         tokenizer has no configured chat template (e.g. raw base models).
         """
         # Pydantic v2: model_dump() strips None fields by default with exclude_none.
@@ -190,7 +190,7 @@ class LLMDeployment:
             return 0
 
     # ------------------------------------------------------------------ #
-    # SSE streaming helper                                                 #
+    # SSE streaming helper                                               #
     # ------------------------------------------------------------------ #
 
     async def _stream_sse(
@@ -212,20 +212,19 @@ class LLMDeployment:
         created = int(time.time())
 
         # --- role chunk ------------------------------------------------
-        yield _sse_line(
-            ChatCompletionChunk(
-                id=req_id,
-                created=created,
-                model=model_name,
-                choices=[
-                    ChunkChoice(
-                        index=0,
-                        delta=DeltaMessage(role="assistant"),
-                        finish_reason=None,
-                    )
-                ],
-            )
+        role_chunk = ChatCompletionChunk(
+            id=req_id,
+            created=created,
+            model=model_name,
+            choices=[
+                ChunkChoice(
+                    index=0,
+                    delta=DeltaMessage(role="assistant", content=""),
+                    finish_reason=None,
+                )
+            ],
         )
+        yield f"data: {role_chunk.model_dump_json()}\n\n"
 
         # --- content chunks -------------------------------------------
         finish_reason = "stop"
@@ -233,46 +232,42 @@ class LLMDeployment:
         try:
             async for token in self._engine.generate(prompt, params):
                 tokens_emitted += 1
-                yield _sse_line(
-                    ChatCompletionChunk(
-                        id=req_id,
-                        created=created,
-                        model=model_name,
-                        choices=[
-                            ChunkChoice(
-                                index=0,
-                                delta=DeltaMessage(content=token),
-                                finish_reason=None,
-                            )
-                        ],
-                    )
+                content_chunk = ChatCompletionChunk(
+                    id=req_id,
+                    created=created,
+                    model=model_name,
+                    choices=[
+                        ChunkChoice(
+                            index=0,
+                            delta=DeltaMessage(content=token),
+                            finish_reason=None,
+                        )
+                    ],
                 )
-            # Heuristic: if generation stopped without exhausting max_new_tokens
-            # we can't distinguish "stop token" from "stop sequence" here,
-            # so we always report "stop".
+                yield f"data: {content_chunk.model_dump_json()}\n\n"
+
         except Exception as exc:
             logger.exception("Engine error during streaming (req_id=%s)", req_id)
-            finish_reason = "stop"  # still send a terminal chunk
+            finish_reason = "stop"
 
         # --- terminal chunk -------------------------------------------
-        yield _sse_line(
-            ChatCompletionChunk(
-                id=req_id,
-                created=created,
-                model=model_name,
-                choices=[
-                    ChunkChoice(
-                        index=0,
-                        delta=DeltaMessage(),
-                        finish_reason=finish_reason,
-                    )
-                ],
-            )
+        terminal_chunk = ChatCompletionChunk(
+            id=req_id,
+            created=created,
+            model=model_name,
+            choices=[
+                ChunkChoice(
+                    index=0,
+                    delta=DeltaMessage(),
+                    finish_reason=finish_reason,
+                )
+            ],
         )
+        yield f"data: {terminal_chunk.model_dump_json()}\n\n"
         yield "data: [DONE]\n\n"
 
     # ------------------------------------------------------------------ #
-    # Routes                                                               #
+    # Routes                                                             #
     # ------------------------------------------------------------------ #
 
     @_fastapi_app.get("/health")
@@ -356,12 +351,3 @@ class LLMDeployment:
                 total_tokens=prompt_tokens + completion_tokens,
             ),
         )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _sse_line(chunk: ChatCompletionChunk) -> str:
-    """Serialise a ``ChatCompletionChunk`` to a single SSE ``data:`` line."""
-    return f"data: {chunk.model_dump_json()}\n\n"

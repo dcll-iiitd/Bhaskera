@@ -1,0 +1,34 @@
+model:
+  name: "bharatgenai/Param2-17B-A2.4B-Thinking"
+  dtype: "bfloat16"
+  trust_remote_code: true  # Required for custom Hugging Face MoE architectures
+
+serve:
+  backend: "vllm"
+  num_replicas: 1
+  port: 0  
+
+  ray_actor_options:
+    num_gpus: 1  # Number of GPUs to allocate to this model
+
+  vllm:
+    # ⚠️ HARDWARE CHECK: 
+    # A 17B model in bfloat16 takes ~34GB of VRAM. 
+    # - If you have an 80GB GPU (like A100), leave this at 1.
+    # - If you have 40GB GPUs (like A6000) or smaller, change this to 2 and num_gpus to 2.
+    tensor_parallel_size: 1 
+    
+    gpu_memory_utilization: 0.92
+    max_model_len: 4096  # Expanded context window for the reasoning trace
+
+  gateway:
+    enabled: true
+    proxy_port: 0  
+    cloudflared: true
+
+inference:
+  # Must be very high so the model doesn't get cut off mid-thought
+  max_new_tokens: 4096  
+  temperature: 0.6
+  top_p: 0.95
+  do_sample: true

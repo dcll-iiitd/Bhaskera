@@ -1,72 +1,44 @@
 [build-system]
-requires = ["setuptools>=42", "wheel"]
+requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "bhaskera"
 version = "2.2.0"
-description = "Ray-native distributed LLM training and inference framework with FSDP2, TurboQuant KV cache, speculative decoding, and integrated Ray Dashboard / Prometheus / Grafana observability"
-requires-python = ">=3.11"
+description = "Bhaskera LLM Training and Serving Framework"
+readme = "README.md"
+requires-python = ">=3.10"
 dependencies = [
-    "torch>=2.4",
-    "transformers>=4.45,<5.0.0",
-    # 'default' extra pulls in dashboard, metrics agent, prometheus_client.
-    "ray[train,data,default]>=2.10",
-    "peft>=0.10",
     "pyyaml>=6.0",
-    "requests>=2.31",
-    "accelerate>=0.20",
-    "datasets>=2.0",
-    "numpy>=1.24",
-    "pandas>=2.0",
-    "tensorboardx>=2.6",
-    "safetensors>=0.4",
-    "tqdm>=4.60",
-    "psutil>=5.9",
-    "packaging>=23.0",
-    "omegaconf>=2.3.0",
-    # NVML bindings for cheap, sub-millisecond GPU telemetry
-    "nvidia-ml-py>=12.535",
-    # Triton-fused RMSNorm / RoPE / SwiGLU / CrossEntropy kernels.
-    "liger-kernel>=0.5",
+    "requests>=2.28.0",
+    "torch>=2.0.0",
+    "transformers>=4.30.0",
+    "accelerate>=0.20.0"
 ]
 
 [project.optional-dependencies]
-wandb     = ["wandb>=0.16"]
-mlflow    = ["mlflow>=2.10"]
-flash     = ["flash-attn>=2.5"]
-dev       = ["pytest>=7", "ruff>=0.4"]
-inference = ["scipy>=1.10"]
-
-# ── Serving stack ──────────────────────────────────────────────────────────
-# Minimum deps for bhaskera-serve (both HF and vLLM backends).
-# ray[serve] is listed separately so that training-only installs
-# don't pull in the full Serve runtime.
 serve = [
-    "ray[serve]>=2.10",
-    "fastapi>=0.110",
-    "uvicorn[standard]>=0.29",
-    "pydantic>=2.5",
+    "ray[serve]>=2.10.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+    "pydantic>=2.5.0"
 ]
-# Fast-path vLLM backend. Install on top of [serve]:
-#   pip install "bhaskera[serve,vllm]"
-vllm = ["vllm>=0.4.3"]
-
-# Convenience meta-extra: install everything needed for the full
-# observability stack (Ray Dashboard already comes with default).
-observability = ["wandb>=0.16", "mlflow>=2.10"]
+vllm = [
+    "vllm>=0.4.3"
+]
+gateway = [
+    "langfuse>=2.0.0",
+    "openai>=1.0.0"
+]
+all = [
+    "ray[serve]>=2.10.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+    "pydantic>=2.5.0",
+    "vllm>=0.4.3",
+    "langfuse>=2.0.0",
+    "openai>=1.0.0"
+]
 
 [project.scripts]
-bhaskera-train     = "bhaskera.launcher.train:main"
-bhaskera-diag      = "bhaskera.launcher.diagnostics:main"
-bhaskera-infer     = "bhaskera.launcher.infer:main"
-bhaskera-tokenize  = "bhaskera.launcher.tokenize:main"
-bhaskera-dashboard = "bhaskera.launcher.dashboard:main"
-# ── new ───────────────────────────────────────────────────────────────────
-bhaskera-serve     = "bhaskera.launcher.serve:main"
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.ruff]
-line-length = 100
+bhaskera-serve = "bhaskera.launcher.serve:main"
