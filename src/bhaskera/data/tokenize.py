@@ -44,6 +44,9 @@ def _cache_version_hash(
     change like ``format: chatml -> alpaca`` invalidates the cache without
     the user having to clear it manually. Old configs (no format set) hash
     to the same value as before, so existing caches keep working.
+
+    is_cpt here represents "any packing mode is active" -- both is_cpt and
+    pack_sequences resolve to this flag before calling this function.
     """
     parts = [model_name, str(seq_len), dataset_name]
     if format_name:
@@ -175,6 +178,8 @@ def persist_tokenized(
       * cfg.data.format          -- name of a registered format (or None)
       * cfg.data.format_options  -- free-form dict, hashed into cache key
       * cfg.data.is_cpt          -- N-to-M packing for continual pre-training
+      * cfg.data.pack_sequences  -- alias for is_cpt; enables CPT-style packing
+                                    for SFT datasets (all tokens predicted)
     Returns the absolute path to the cache directory.
     """
     if not cfg.data.cache_dir:
@@ -188,17 +193,31 @@ def persist_tokenized(
     format_name    = getattr(cfg.data, "format", None)
     format_options = dict(getattr(cfg.data, "format_options", None) or {})
     is_cpt         = getattr(cfg.data, "is_cpt", False)
+    pack_sequences = getattr(cfg.data, "pack_sequences", False)
+
+    # pack_sequences is a user-facing alias for CPT-style packing on SFT data.
+    # Both flags collapse into one effective flag for cache-key and metadata
+    # purposes so that flipping either one correctly invalidates the cache.
+    effective_packing = is_cpt or pack_sequences
+
+    if pack_sequences and not is_cpt:
+        logger.info(
+            "pack_sequences=True: enabling CPT-style sequence packing for SFT data. "
+            "Note: all tokens are predicted in packed mode (no per-token prompt masking)."
+        )
 
     version    = _cache_version_hash(model_name, seq_len, dataset_name,
-                                     format_name, format_options, is_cpt)
+                                     format_name, format_options, effective_packing)
     cache_path = os.path.join(cfg.data.cache_dir, f"{dataset_name}_{version}")
 
-    if (_verify_cache(cache_path, model_name, seq_len, dataset_name, format_name, is_cpt)
+    if (_verify_cache(cache_path, model_name, seq_len, dataset_name,
+                      format_name, effective_packing)
             and not cfg.data.overwrite_cache):
         logger.info(
             f"Tokenizer cache hit -> {cache_path} "
             f"(model={model_name!r}, seq_len={seq_len}, "
-            f"dataset={dataset_name!r}, format={format_name!r}, is_cpt={is_cpt})"
+            f"dataset={dataset_name!r}, format={format_name!r}, "
+            f"effective_packing={effective_packing})"
         )
         return cache_path
 
@@ -210,7 +229,8 @@ def persist_tokenized(
     logger.info(
         f"Tokenizing dataset '{dataset_name}' -> {cache_path} "
         f"(model={model_name!r}, seq_len={seq_len}, "
-        f"format={format_name!r}, compression={cfg.data.tokenize_compression!r}, is_cpt={is_cpt})"
+        f"format={format_name!r}, compression={cfg.data.tokenize_compression!r}, "
+        f"effective_packing={effective_packing})"
     )
 
     tokenized_ds = _apply_map_batches(ds, cfg, text_col)
@@ -228,7 +248,7 @@ def persist_tokenized(
         num_rows = -1
 
     _write_metadata(cache_path, model_name, seq_len, dataset_name, num_rows,
-                    format_name, format_options, is_cpt)
+                    format_name, format_options, effective_packing)
 
     logger.info(f"Tokenization complete -> {cache_path}")
     return cache_path
@@ -295,6 +315,8 @@ class TokenizerActor:
     When ``format_name`` is set, each row is rendered to a string by the
     format registry before tokenisation.
     When ``is_cpt`` is set, operates as an N-to-M sequence packer across batches.
+    ``is_cpt`` is also True when ``pack_sequences=True`` in the config (resolved
+    in _apply_map_batches before this actor is constructed).
     """
 
     def __init__(
@@ -360,7 +382,7 @@ class TokenizerActor:
             if hasattr(texts, "tolist"):
                 texts = texts.tolist()
 
-        # -- CPT Path: Continuous Sequence Packing -------------------------
+        # -- CPT / pack_sequences Path: Continuous Sequence Packing -----------
         if self.is_cpt:
             # Tokenize without truncation/padding
             out = self.tokenizer(texts, add_special_tokens=False)
@@ -382,9 +404,19 @@ class TokenizerActor:
             self._remainder = stream[valid_len:]
 
             if n_chunks == 0:
-                # Return empty arrays to let Ray Data drop this iteration
-                dummy = np.zeros((0, self.seq_len), dtype=np.int32)
-                return {"input_ids": dummy, "attention_mask": dummy, "labels": dummy}
+                # Not enough tokens yet for a complete chunk; remainder is saved
+                # for the next call.  We CANNOT return shape (0, seq_len) here
+                # because PyArrow rejects empty 2-D arrays with:
+                #   ArrowInvalid: only handle 1-dimensional arrays
+                # Instead we return a single all-zero placeholder row whose
+                # attention_mask sum is 0.  _apply_map_batches drops these
+                # placeholder rows via a .filter() step after map_batches.
+                dummy = np.zeros((1, self.seq_len), dtype=np.int32)
+                return {
+                    "input_ids":      dummy,
+                    "attention_mask": np.zeros((1, self.seq_len), dtype=np.int32),
+                    "labels":         np.full((1, self.seq_len), -100, dtype=np.int32),
+                }
 
             # Slice and reshape into uniform blocks
             reshaped = np.array(stream[:valid_len], dtype=np.int32).reshape(n_chunks, self.seq_len)
@@ -395,7 +427,7 @@ class TokenizerActor:
                 "labels":         reshaped.copy(),          # Predict every token
             }
 
-        # -- SFT Path: 1-to-1 Truncation -----------------------------------
+        # -- SFT Path: 1-to-1 Truncation --------------------------------------
         out = self.tokenizer(
             texts,
             max_length=self.seq_len,
@@ -488,6 +520,17 @@ def _apply_map_batches(
     fix #27: batch_size from cfg.data.tokenize_batch_size.
     Phase 2: format_name / format_options pulled from cfg.data and threaded
     through the factory.
+
+    pack_sequences (DataConfig) is a user-facing alias for is_cpt that enables
+    CPT-style sequence packing on SFT datasets.  Both flags are resolved into
+    a single ``effective_packing`` bool before the factory is constructed, so
+    the tokenizer worker sees exactly one consistent packing flag.
+
+    When effective_packing is True, TokenizerActor may emit a placeholder row
+    (attention_mask all zeros) when a batch doesn't produce a complete chunk.
+    These are dropped by the .filter() step added below, which avoids the
+    PyArrow ``only handle 1-dimensional arrays`` error that arises when an
+    empty (0, seq_len) numpy array is returned instead.
     """
     model_name        = cfg.model.name
     seq_len           = cfg.data.seq_len
@@ -497,6 +540,17 @@ def _apply_map_batches(
     format_name       = getattr(cfg.data, "format", None)
     format_options    = dict(getattr(cfg.data, "format_options", None) or {})
     is_cpt            = getattr(cfg.data, "is_cpt", False)
+    pack_sequences    = getattr(cfg.data, "pack_sequences", False)
+
+    # pack_sequences is an SFT-friendly alias for CPT-style packing.
+    # Resolving both flags here keeps TokenizerActor's interface simple.
+    effective_packing = is_cpt or pack_sequences
+
+    if pack_sequences and not is_cpt:
+        logger.info(
+            "pack_sequences=True: enabling CPT-style sequence packing. "
+            "All tokens are predicted in packed mode (no per-token prompt masking)."
+        )
 
     factory = _TokenizerActorFactory(
         model_name=model_name,
@@ -505,15 +559,24 @@ def _apply_map_batches(
         trust_remote_code=trust_remote_code,
         format_name=format_name,
         format_options=format_options,
-        is_cpt=is_cpt,
+        is_cpt=effective_packing,
     )
 
     ds = ds.repartition(max(num_workers * 2, 1))
 
-    return ds.map_batches(
+    ds = ds.map_batches(
         factory,
         batch_format="numpy",
         batch_size=batch_size,
         num_cpus=1,
         concurrency=num_workers,
     )
+
+    if effective_packing:
+        # Drop placeholder rows inserted by TokenizerActor when a batch didn't
+        # have enough tokens to fill a complete seq_len chunk.  In normal packed
+        # output every attention_mask row is all-ones; placeholder rows are the
+        # only rows whose attention_mask sum is 0.
+        ds = ds.filter(lambda row: bool(np.sum(row["attention_mask"]) > 0))
+
+    return ds

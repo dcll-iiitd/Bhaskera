@@ -41,7 +41,7 @@ data:
   name: "ultrachat"
   seq_len: 2048
   num_workers: 4
-  tokenized_path: "/scratch/ldls-iiitd/training-framework/newchanges/ultrachat_380c5ebdec8d2efe"
+  tokenized_path: "/scratch/ldls-iiitd/training-framework/cpt/ultrachat_d52e738af6ac1e5a"
   prefetch_batches: 4
   local_shuffle_buffer_multiplier: 10
   pack_sequences: false            # set true for better GPU utilisation at seq_len=2048
@@ -73,7 +73,7 @@ moe:
 # Training
 # -----------------------------------------------------------------------------
 training:
-  batch_size: 8                    # safe to go higher than MoE — no expert activation spikes
+  batch_size: 4                    # safe to go higher than MoE — no expert activation spikes
   grad_accum: 3                    # effective batch = 4 × 8 × 3 = 96 sequences/step
   lr: 2.0e-4
   weight_decay: 0.01
