@@ -39,12 +39,14 @@ class ThroughputTracker:
         peak_flops_per_gpu: float = 312e12,  # A100 bf16
         window: int = 50,
         warmup_steps: int = 5,
+        is_peft: bool = False,               # NEW: Tracks if we are using LoRA
     ) -> None:
         self._params = max(1, int(params_for_flops))
         self._world  = max(1, int(world_size))
         self._peak   = max(1.0, float(peak_flops_per_gpu))
         self._window = max(1, int(window))
         self._warmup = max(0, int(warmup_steps))
+        self._is_peft = is_peft
 
         self._step_times: deque[float] = deque(maxlen=self._window)
         self._last_t: Optional[float] = None
@@ -57,9 +59,9 @@ class ThroughputTracker:
     def step(
         self,
         *,
-        tokens_in_step: int,
-        samples_in_step: int,
-        seq_len: int,
+        local_tokens_in_step: int,  # Tokens processed by ONE GPU this step
+        local_samples_in_step: int, # Samples processed by ONE GPU this step
+        seq_len: int,               
     ) -> dict[str, float]:
         """
         Close out one optimizer step and emit derived metrics.
@@ -67,13 +69,13 @@ class ThroughputTracker:
         Returns a dict like::
 
             {
-                "throughput/step_time_s":        0.412,
-                "throughput/step_time_ema_s":    0.418,
-                "throughput/tokens_per_sec":     19880.0,
+                "throughput/step_time_s":            0.412,
+                "throughput/step_time_ema_s":        0.418,
+                "throughput/tokens_per_sec_global":  19880.0,
                 "throughput/tokens_per_sec_per_gpu": 2485.0,
-                "throughput/samples_per_sec":    9.7,
-                "throughput/mfu_pct":            41.2,
-                "throughput/total_steps":        137.0,
+                "throughput/samples_per_sec_global": 9.7,
+                "throughput/mfu_pct":                41.2,
+                "throughput/total_steps":            137.0,
             }
         """
         now = time.perf_counter()
@@ -93,6 +95,7 @@ class ThroughputTracker:
         out["throughput/step_time_s"] = dt
         if self._steps_seen > self._warmup:
             self._step_times.append(dt)
+            
         if self._step_times:
             ema = sum(self._step_times) / len(self._step_times)
             out["throughput/step_time_ema_s"] = ema
@@ -100,22 +103,30 @@ class ThroughputTracker:
         else:
             ref_dt = dt
 
-        # Throughput uses the smoothed dt so the panel doesn't jitter.
-        if tokens_in_step > 0:
-            tps = tokens_in_step / ref_dt
-            out["throughput/tokens_per_sec"] = tps
-            out["throughput/tokens_per_sec_per_gpu"] = tps / self._world
-        if samples_in_step > 0:
-            out["throughput/samples_per_sec"] = samples_in_step / ref_dt
+        # ---------------------------------------------------------
+        # Throughput Calculations (Using local per-GPU inputs)
+        # ---------------------------------------------------------
+        if local_tokens_in_step > 0:
+            local_tps = local_tokens_in_step / ref_dt
+            out["throughput/tokens_per_sec_per_gpu"] = local_tps
+            # Scale up for whole-system throughput
+            out["throughput/tokens_per_sec_global"] = local_tps * self._world
+            
+        if local_samples_in_step > 0:
+            local_sps = local_samples_in_step / ref_dt
+            out["throughput/samples_per_sec_global"] = local_sps * self._world
 
-        # MFU — model FLOPs utilization
-        # FLOPs/token ≈ 6 * params  (3-pass approximation, fwd 1× + bwd 2×)
-        # We deliberately ignore the seq²·d attention term to keep the
-        # estimate stable across configs; it adds <5% at typical seq_len.
-        flops_per_token = 6.0 * self._params
-        if tokens_in_step > 0:
-            achieved_flops_per_sec = (
-                flops_per_token * tokens_in_step / ref_dt / self._world
-            )
-            out["throughput/mfu_pct"] = 100.0 * achieved_flops_per_sec / self._peak
+        # ---------------------------------------------------------
+        # MFU Calculation (Strictly Per-GPU)
+        # ---------------------------------------------------------
+        # Standard FT: 6 FLOPs per param (2 fwd, 2 bwd_act, 2 bwd_weight)
+        # LoRA/PEFT: ~4 FLOPs per param (2 fwd, 2 bwd_act, 0 bwd_weight for base)
+        flops_multiplier = 4.0 if self._is_peft else 6.0 
+        flops_per_token = flops_multiplier * self._params
+        
+        if local_tokens_in_step > 0:
+            # How many FLOPs this specific GPU achieved per second
+            achieved_flops_per_sec_per_gpu = flops_per_token * local_tps
+            out["throughput/mfu_pct"] = 100.0 * (achieved_flops_per_sec_per_gpu / self._peak)
+
         return out

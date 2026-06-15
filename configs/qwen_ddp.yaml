@@ -35,7 +35,7 @@ data:
   name: "ultrachat"
   seq_len: 4096
   num_workers: 8
-  tokenized_path: "/scratch/ldls-iiitd/training-framework/newchanges/ultrachat_65563425aaa0681e"
+  tokenized_path: "/scratch/ldls-iiitd/training-framework/cpt/ultrachat_65563425aaa0681e"
   prefetch_batches: 8
   local_shuffle_buffer_multiplier: 16
   pack_sequences: true

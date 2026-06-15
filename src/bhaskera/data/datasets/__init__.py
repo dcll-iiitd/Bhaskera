@@ -11,3 +11,4 @@ from . import ultrachat       # noqa: F401
 from . import openassistant   # noqa: F401
 from . import redpajama       # noqa: F401
 from . import local_chat      # noqa: F401  — generic JSONL/JSON/Parquet loader
+from . import local_cpt       # noqa: F401  — generic CPT continuous packing loader

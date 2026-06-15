@@ -4,8 +4,9 @@ model:
 
 data:
   name: "ultrachat"            # Specifies the registered dataset
-  seq_len: 4096                # Maximum sequence length
-  cache_dir: "/scratch/ldls-iiitd/training-framework/newchanges"         # REQUIRED: Directory where the parquet files will be saved[cite: 1]
+  seq_len: 4096
+  pack_sequences: true                      # Maximum sequence length
+  cache_dir: "/scratch/ldls-iiitd/training-framework/cpt"         # REQUIRED: Directory where the parquet files will be saved[cite: 1]
 
   # --- Parallelism & Performance Tuning ---
   num_workers: 8              # Set this to your node's total CPU cores minus 1 or 2[cite: 1]

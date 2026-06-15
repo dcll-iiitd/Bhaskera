@@ -1,8 +1,5 @@
 """
 Bhaskera config — single source of truth.
-
-
-
 """
 from __future__ import annotations
 
@@ -82,6 +79,8 @@ class DataConfig:
     name: str = "ultrachat"
     seq_len: int = 2048
     num_workers: int = 4
+    
+    is_cpt: bool = False  # Continual Pre-Training continuous packing flag
 
     # ── Phase 1: persistent-cache plumbing ─────────────────────────────────
     tokenized_path: Optional[str] = None
@@ -199,9 +198,6 @@ class LoggingConfig:
 
 # ── Monitoring sub-configs ────────────────────────────────────────────────
 
-
-
-
 @dataclass
 class MetricsConfig:
     """Per-step custom-metric toggles."""
@@ -297,6 +293,7 @@ def _dict_to_config(raw: dict) -> Config:
             name=data_raw.get("name", "ultrachat"),
             seq_len=int(data_raw.get("seq_len", 2048)),
             num_workers=int(data_raw.get("num_workers", 4)),
+            is_cpt=bool(data_raw.get("is_cpt", False)),
 
             # Phase 1
             tokenized_path=data_raw.get("tokenized_path"),
