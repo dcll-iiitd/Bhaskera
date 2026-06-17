@@ -129,6 +129,21 @@ class LLMDeployment:
         self._engine: BaseEngine = create_engine(cfg)
         self._tokenizer  = self._engine.get_tokenizer()
         self._model_name = cfg.model.name
+
+        # --- ADD THIS FIX ---
+        if self._tokenizer.chat_template is None:
+            logger.info("Injecting fallback Llama-3 chat template.")
+            self._tokenizer.chat_template = (
+                "{% set loop_messages = messages %}"
+                "{% for message in loop_messages %}"
+                "{% set content = '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n'+ message['content'] | trim + '<|eot_id|>' %}"
+                "{% if loop.index0 == 0 %}{% set content = bos_token + content %}{% endif %}"
+                "{{ content }}"
+                "{% endfor %}"
+                "{% if add_generation_prompt %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}{% endif %}"
+            )
+        # --------------------
+
         logger.info(
             "LLMDeployment ready | backend=%s model=%s",
             cfg.serve.backend, self._model_name,

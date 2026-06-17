@@ -1,0 +1,28 @@
+model:
+  name: "Qwen/QwQ-32B"
+  dtype: "bfloat16"
+  trust_remote_code: true
+
+serve:
+  backend: "vllm"
+  num_replicas: 1
+  port: 0  
+
+  ray_actor_options:
+    num_gpus: 2                      # FIXED: Tells Ray Serve to allocate 3 GPUs
+
+  vllm:
+    tensor_parallel_size: 2          # FIXED: Tells vLLM to split the 32B model across 3 GPUs
+    gpu_memory_utilization: 0.90
+    max_model_len: 40960             # Safely fits inside the model's native limit
+
+  gateway:
+    enabled: true
+    proxy_port: 0  
+    cloudflared: true
+
+inference:
+  max_new_tokens: 32768
+  temperature: 0.6
+  top_p: 0.95
+  do_sample: true
