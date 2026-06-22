@@ -2,14 +2,11 @@
 bhaskera.launcher.train
 =======================
 Unified CLI + Ray Train driver.
-
 Local (1–N GPUs):
     python -m bhaskera.launcher.train --config configs/config.yaml
 
 SLURM (called by scripts/submit.sh after Ray cluster is bootstrapped):
     python -m bhaskera.launcher.train --config configs/config.yaml --num-workers 8
-
-
 """
 from __future__ import annotations
 import argparse
@@ -26,6 +23,7 @@ from bhaskera.config import load_config
 from bhaskera.data import build_ray_dataset
 from bhaskera.launcher.monitoring import setup_monitoring
 from bhaskera.launcher.worker import worker_fn
+from bhaskera.plugins.loader import load_plugins
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,6 +35,9 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     args = _parse_args()
     cfg  = load_config(args.config)
+    
+    # Load plugins on the driver to catch import failures early before spinning up Ray
+    load_plugins(cfg)
 
     if args.no_dashboard:
         cfg.monitoring.dashboard = False
@@ -129,11 +130,9 @@ def _parse_args() -> argparse.Namespace:
 def _count_gpus() -> int:
     """
     fix #26: returns the true total GPU count across the SLURM job.
-
     On SLURM, torch.cuda.device_count() only sees GPUs on the head node
     (typically 0 or 1 on login nodes). The correct count comes from
     SLURM_NNODES × SLURM_GPUS_PER_NODE when both are set.
-
     Priority:
       1. SLURM_NNODES × SLURM_GPUS_PER_NODE (multi-node SLURM job)
       2. torch.cuda.device_count()            (local / single-node)

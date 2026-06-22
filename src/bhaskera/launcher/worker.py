@@ -1,10 +1,9 @@
 """
 bhaskera.launcher.worker
 ========================
-Per-GPU entry point.  Called by Ray Train's TorchTrainer for each
+Per-GPU entry point.
+Called by Ray Train's TorchTrainer for each
 actor and also directly by raw SLURM workers.
-
-
 """
 from __future__ import annotations
 
@@ -21,6 +20,7 @@ from bhaskera.distributed import wrap_model
 from bhaskera.models import build_model
 from bhaskera.trainer import train
 from bhaskera.utils import build_logger
+from bhaskera.plugins.loader import load_plugins
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 def worker_fn(cfg_dict: dict) -> None:
     """Entry point for a single GPU worker."""
     cfg = Config.from_dict(cfg_dict)
+
+    # Load plugins prior to building the model or trainer loop
+    load_plugins(cfg)
 
     ray_ctx    = ray.train.get_context()
     local_rank = ray_ctx.get_local_rank()

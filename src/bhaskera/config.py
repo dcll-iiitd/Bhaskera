@@ -14,6 +14,18 @@ import yaml
 # ---------------------------------------------------------------------------
 
 @dataclass
+class OptimizerConfig:
+    backend: str = "default"  # 'default', 'torch', 'plugin'
+    class_name: Optional[str] = None
+    name: Optional[str] = None
+    kwargs: dict = field(default_factory=dict)
+
+@dataclass
+class PluginsConfig:
+    optimizers: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ModelConfig:
     name: str = "tiiuae/falcon-7b"
     dtype: str = "bfloat16"
@@ -114,7 +126,6 @@ class DataConfig:
     val_tokenized_path: Optional[str] = None
 
 
-
 @dataclass
 class FSDPConfig:
     sharding_strategy: str = "FULL_SHARD"
@@ -145,10 +156,10 @@ class DDPConfig:
 
     # DDP static_graph optimisation. When True, DDP caches the autograd
     # reduction order from iteration 1 and reuses it, enabling extra
-    # bucketing optimisations. NOTE: mutually exclusive with
-    # find_unused_parameters=True (DDP itself enforces this) and with
-    # manual grad-sync toggling for grad accumulation. The training loop
-    # detects static_graph and falls back to per-micro-step all-reduces.
+    # bucketing optimisations.
+    # NOTE: mutually exclusive with find_unused_parameters=True (DDP itself enforces this)
+    # and with manual grad-sync toggling for grad accumulation.
+    # The training loop detects static_graph and falls back to per-micro-step all-reduces.
     static_graph: bool = False
 
 
@@ -171,9 +182,11 @@ class TrainingConfig:
     max_grad_norm: float = 1.0
     seed: int = 42
     deterministic: bool = False
+    
     grad_clip: Optional[float] = 1.0          # Phase 1: used by no_sync loop
     max_grad_skip_steps: int = 100
     distributed: DistributedConfig = field(default_factory=DistributedConfig)
+    optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
 
 
 @dataclass
@@ -237,6 +250,7 @@ class Config:
     logging: LoggingConfig        = field(default_factory=LoggingConfig)
     inference: InferenceConfig    = field(default_factory=InferenceConfig)
     monitoring: MonitoringConfig  = field(default_factory=MonitoringConfig)
+    plugins: PluginsConfig        = field(default_factory=PluginsConfig)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -264,6 +278,7 @@ def _dict_to_config(raw: dict) -> Config:
     fsdp_raw    = _get(raw, "training", "distributed", "fsdp", default={}) or {}
     ddp_raw     = _get(raw, "training", "distributed", "ddp",  default={}) or {}
     dist_raw    = _get(raw, "training", "distributed", default={}) or {}
+    opt_raw     = _get(raw, "training", "optimizer",   default={}) or {}
     train_raw   = _get(raw, "training", default={}) or {}
     log_raw     = _get(raw, "logging",  default={}) or {}
     ckpt_raw    = _get(raw, "checkpoint", default={}) or {}
@@ -279,8 +294,13 @@ def _dict_to_config(raw: dict) -> Config:
     prom_raw    = _get(raw, "monitoring", "prometheus", default={}) or {}
     graf_raw    = _get(raw, "monitoring", "grafana",    default={}) or {}
     metrics_raw = _get(raw, "monitoring", "metrics",    default={}) or {}
+    
+    plugins_raw = _get(raw, "plugins", default={}) or {}
 
     return Config(
+        plugins=PluginsConfig(
+            optimizers=list(plugins_raw.get("optimizers", []))
+        ),
         model=ModelConfig(
             name=model_raw.get("name", "tiiuae/falcon-7b"),
             dtype=model_raw.get("dtype", "bfloat16"),
@@ -345,6 +365,12 @@ def _dict_to_config(raw: dict) -> Config:
             deterministic=bool(train_raw.get("deterministic", False)),
             grad_clip=train_raw.get("grad_clip", 1.0),
             max_grad_skip_steps=int(train_raw.get("max_grad_skip_steps", 100)),
+            optimizer=OptimizerConfig(
+                backend=str(opt_raw.get("backend", "default")),
+                class_name=opt_raw.get("class_name"),
+                name=opt_raw.get("name"),
+                kwargs=dict(opt_raw.get("kwargs", {})),
+            ),
             distributed=DistributedConfig(
                 strategy=str(dist_raw.get("strategy", "fsdp")),
                 fsdp=FSDPConfig(
