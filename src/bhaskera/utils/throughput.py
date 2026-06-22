@@ -39,14 +39,21 @@ class ThroughputTracker:
         peak_flops_per_gpu: float = 312e12,  # A100 bf16
         window: int = 50,
         warmup_steps: int = 5,
-        is_peft: bool = False,               # NEW: Tracks if we are using LoRA
+        is_peft: bool = False,
+        activation_checkpointing: bool = False,
+        num_layers: int = 0,
+        hidden_size: int = 0,
     ) -> None:
         self._params = max(1, int(params_for_flops))
         self._world  = max(1, int(world_size))
         self._peak   = max(1.0, float(peak_flops_per_gpu))
         self._window = max(1, int(window))
         self._warmup = max(0, int(warmup_steps))
+        
         self._is_peft = is_peft
+        self._checkpointing = activation_checkpointing
+        self._num_layers = num_layers
+        self._hidden_size = hidden_size
 
         self._step_times: deque[float] = deque(maxlen=self._window)
         self._last_t: Optional[float] = None
@@ -121,9 +128,21 @@ class ThroughputTracker:
         # ---------------------------------------------------------
         # Standard FT: 6 FLOPs per param (2 fwd, 2 bwd_act, 2 bwd_weight)
         # LoRA/PEFT: ~4 FLOPs per param (2 fwd, 2 bwd_act, 0 bwd_weight for base)
-        flops_multiplier = 4.0 if self._is_peft else 6.0 
+        # Checkpointing adds 2 FLOPs per param for the recomputed forward pass
+        if self._is_peft:
+            flops_multiplier = 6.0 if self._checkpointing else 4.0
+        else:
+            flops_multiplier = 8.0 if self._checkpointing else 6.0 
+
         flops_per_token = flops_multiplier * self._params
         
+        # Exact Attention FLOPs
+        if self._num_layers > 0 and self._hidden_size > 0:
+            # 12 LHS for standard, +4 LHS for recomputed forward pass
+            att_mult = 16.0 if self._checkpointing else 12.0
+            attention_flops = att_mult * self._num_layers * seq_len * self._hidden_size
+            flops_per_token += attention_flops
+            
         if local_tokens_in_step > 0:
             # How many FLOPs this specific GPU achieved per second
             achieved_flops_per_sec_per_gpu = flops_per_token * local_tps

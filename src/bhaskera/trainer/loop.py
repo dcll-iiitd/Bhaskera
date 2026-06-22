@@ -129,6 +129,9 @@ def train(
         window=int(getattr(metrics_cfg, "throughput_window", 50)) if metrics_cfg else 50,
         warmup_steps=int(getattr(metrics_cfg, "throughput_warmup", 5)) if metrics_cfg else 5,
         is_peft=getattr(cfg.lora, "enabled", False),
+        activation_checkpointing=getattr(train_cfg, "gradient_checkpointing", False),
+        num_layers=getattr(profile, "num_hidden_layers", 0),
+        hidden_size=getattr(profile, "hidden_size", 0),
     ) if throughput_on else None
 
     if tracker:

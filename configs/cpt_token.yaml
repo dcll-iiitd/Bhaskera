@@ -17,7 +17,7 @@ data:
   overwrite_cache: true     # Useful when repeatedly testing
   
   # Point this to the folder where you saved the JSONL file above
-  path: "/scratch/ldls-iiitd/training-framework/cpt/wikitext103_train.jsonl"
+  path: "/mnt/disk1/Framework/cpt/wikitext103_train.jsonl"
   
   # The output directory where the packed Parquet files will be saved
-  cache_dir: "/scratch/ldls-iiitd/training-framework/cpt/data"
+  cache_dir: "/mnt/disk1/Framework/cpt"
