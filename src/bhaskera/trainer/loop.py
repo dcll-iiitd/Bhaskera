@@ -438,9 +438,10 @@ def _run_epoch(
             ran_eval = True
 
         # Clock protection: Reset throughput step timers if evaluations halted execution
-        if ran_eval and throughput is not None:
-            throughput.reset_step_clock()
-
+        if ran_eval:
+            if throughput is not None:
+                throughput.reset_step_clock()
+            torch.cuda.empty_cache()
     if epoch_steps == 0:
         return step, best_ckpts
 
