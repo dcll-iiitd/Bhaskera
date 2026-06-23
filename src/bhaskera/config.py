@@ -87,6 +87,26 @@ class InferenceConfig:
 
 
 @dataclass
+class ValidationConfig:
+    dataset: str = "validation"
+    every_n_steps: int = 500
+    every_n_epochs: int = 1
+    metrics: list[str] = field(default_factory=lambda: ["loss", "perplexity"])
+
+@dataclass
+class BenchmarksConfig:
+    every_n_steps: int = 2000
+    every_n_epochs: int = 1
+    tasks: list[str] = field(default_factory=list)
+
+@dataclass
+class EvaluationConfig:
+    enabled: bool = False
+    validation: ValidationConfig = field(default_factory=ValidationConfig)
+    benchmarks: BenchmarksConfig = field(default_factory=BenchmarksConfig)
+
+
+@dataclass
 class DataConfig:
     name: str = "ultrachat"
     seq_len: int = 2048
@@ -105,24 +125,11 @@ class DataConfig:
     pack_sequences: bool = False
 
     # ── Phase 2: chat-format / local-files plumbing ────────────────────────
-    # Name of a registered format renderer (chatml, alpaca, sharegpt, or
-    # whatever you @register_format yourself). When set, TokenizerActor
-    # renders each row to a single string before tokenising.
     format: Optional[str] = None
-    # Free-form dict passed to the renderer. Hashed into the cache key,
-    # so changing it triggers a re-tokenize automatically.
     format_options: dict = field(default_factory=dict)
-
-    # Local data sources (used by the "local" dataset and the tokenize CLI).
-    # Each may be a single file, a directory, or a glob pattern.
     path: Optional[str] = None        # single-source shorthand (used as train)
     train_path: Optional[str] = None
     val_path: Optional[str] = None
-
-    # Optional pre-tokenized validation set, populated by bhaskera-tokenize
-    # when run with --split both. Loaded by the trainer alongside
-    # tokenized_path. (Wire this into your training loop where it makes
-    # sense — see launcher/train.py.)
     val_tokenized_path: Optional[str] = None
 
 
@@ -143,23 +150,7 @@ class DDPConfig:
     find_unused_parameters: bool = False
     gradient_as_bucket_view: bool = True
     broadcast_buffers: bool = False
-
-    # ── DDP-parity additions ───────────────────────────────────────────────
-    # Activation checkpointing under DDP. Identical mechanism to FSDP's AC
-    # (same activation_ckpt.apply_activation_checkpointing call), but applied
-    # to the raw module BEFORE the DDP wrap so DDP's parameter-graph snapshot
-    # sees the checkpoint-wrapped modules.
-    # Works for both dense (decoder-layer granularity) and MoE
-    # (per-expert granularity), driven off the ModelProfile from
-    # introspect.py — no hardcoded layer names.
     activation_checkpointing: bool = False
-
-    # DDP static_graph optimisation. When True, DDP caches the autograd
-    # reduction order from iteration 1 and reuses it, enabling extra
-    # bucketing optimisations.
-    # NOTE: mutually exclusive with find_unused_parameters=True (DDP itself enforces this)
-    # and with manual grad-sync toggling for grad accumulation.
-    # The training loop detects static_graph and falls back to per-micro-step all-reduces.
     static_graph: bool = False
 
 
@@ -199,7 +190,6 @@ class CheckpointConfig:
 
 @dataclass
 class LoggingConfig:
-    # str | list[str] | None — see _normalize_trackers in loggers/__init__
     tracker: Optional[Union[str, list]] = None
     project: str = "bhaskera"
     run_name: str = "run"
@@ -213,7 +203,6 @@ class LoggingConfig:
 
 @dataclass
 class MetricsConfig:
-    """Per-step custom-metric toggles."""
     enabled: bool = True
     system_every_n_steps: int = 10
     cuda_every_n_steps: int = 10
@@ -227,7 +216,6 @@ class MetricsConfig:
 
 @dataclass
 class MonitoringConfig:
-    """Ray Dashboard + per-step metrics (MLflow handles experiment tracking)."""
     dashboard:           bool          = True
     dashboard_host:      str           = "0.0.0.0"
     dashboard_port:      int           = 8265
@@ -249,6 +237,7 @@ class Config:
     checkpoint: CheckpointConfig  = field(default_factory=CheckpointConfig)
     logging: LoggingConfig        = field(default_factory=LoggingConfig)
     inference: InferenceConfig    = field(default_factory=InferenceConfig)
+    evaluation: EvaluationConfig  = field(default_factory=EvaluationConfig)
     monitoring: MonitoringConfig  = field(default_factory=MonitoringConfig)
     plugins: PluginsConfig        = field(default_factory=PluginsConfig)
 
@@ -289,6 +278,9 @@ def _dict_to_config(raw: dict) -> Config:
     infer_raw   = _get(raw, "inference", default={}) or {}
     tq_raw      = _get(raw, "inference", "turboquant", default={}) or {}
     spec_raw    = _get(raw, "inference", "speculative", default={}) or {}
+    eval_raw    = _get(raw, "evaluation", default={}) or {}
+    val_raw     = _get(raw, "evaluation", "validation", default={}) or {}
+    bench_raw   = _get(raw, "evaluation", "benchmarks", default={}) or {}
 
     mon_raw     = _get(raw, "monitoring", default={}) or {}
     prom_raw    = _get(raw, "monitoring", "prometheus", default={}) or {}
@@ -389,7 +381,6 @@ def _dict_to_config(raw: dict) -> Config:
                     find_unused_parameters=bool(ddp_raw.get("find_unused_parameters", False)),
                     gradient_as_bucket_view=bool(ddp_raw.get("gradient_as_bucket_view", True)),
                     broadcast_buffers=bool(ddp_raw.get("broadcast_buffers", False)),
-                    # ── DDP-parity additions ──
                     activation_checkpointing=bool(ddp_raw.get("activation_checkpointing", False)),
                     static_graph=bool(ddp_raw.get("static_graph", False)),
                 ),
@@ -432,6 +423,20 @@ def _dict_to_config(raw: dict) -> Config:
                 draft_model_name=str(spec_raw.get("draft_model_name", "")),
                 num_draft_tokens=int(spec_raw.get("num_draft_tokens", 5)),
             ),
+        ),
+        evaluation=EvaluationConfig(
+            enabled=bool(eval_raw.get("enabled", False)),
+            validation=ValidationConfig(
+                dataset=str(val_raw.get("dataset", "validation")),
+                every_n_steps=int(val_raw.get("every_n_steps", 500)),
+                every_n_epochs=int(val_raw.get("every_n_epochs", 1)),
+                metrics=list(val_raw.get("metrics", ["loss", "perplexity"])),
+            ),
+            benchmarks=BenchmarksConfig(
+                every_n_steps=int(bench_raw.get("every_n_steps", 2000)),
+                every_n_epochs=int(bench_raw.get("every_n_epochs", 1)),
+                tasks=list(bench_raw.get("tasks", [])),
+            )
         ),
         monitoring=MonitoringConfig(
             dashboard=bool(mon_raw.get("dashboard", True)),

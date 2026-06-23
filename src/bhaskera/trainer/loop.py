@@ -1,7 +1,7 @@
 """
 bhaskera.trainer.loop
 =====================
-Pure training loop.
+Pure training loop with pluggable evaluation and throughput clock protection.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from .checkpointing import maybe_resume, save_and_prune
 from .moe import compute_expert_utilization, extract_aux_loss
 from .optim import build_optimizer, build_scheduler
 from .precision import resolve_autocast_dtype
+from bhaskera.evaluation import Evaluator
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +33,7 @@ def _set_grad_sync(model: torch.nn.Module, enabled: bool) -> None:
     """
     Toggle gradient all-reduce for the wrapped model.
     Dispatches by wrapper type: FSDP2 → set_requires_gradient_sync(model, enabled)
-    Walks every sharded submodule regardless of any PEFT / wrapper layers sitting on top.
-    set_requires_gradient_sync bypasses wrapper __getattr__ chains and operates directly on the FSDP2 submodule state.
     DDP → model.require_backward_grad_sync = enabled
-    This is the underlying flag that DDP.no_sync() toggles.
-    Setting it directly avoids the no_sync() context-manager dance (and works even when DDP is wrapping a PEFT model that doesn't delegate the no_sync attribute).
-    SKIPPED when static_graph=True — DDP's static_graph mode caches the reduction order on the first iteration and is incompatible with mid-run sync toggling.
-    Other → no-op (single-GPU / CPU / mixed contexts). Call with enabled=False before every micro-step except the last, and enabled=True on the last micro-step so the all-reduce fires exactly once per optimizer step.
     """
     # ── FSDP2 path ──────────────────────────────────────────────────
     try:
@@ -57,9 +52,6 @@ def _set_grad_sync(model: torch.nn.Module, enabled: bool) -> None:
 
     # ── DDP path ────────────────────────────────────────────────────
     if isinstance(model, DDP):
-        # static_graph=True bakes the reduction graph into DDP after the
-        # first iteration; toggling require_backward_grad_sync after that
-        # raises "Your training graph has changed in this iteration".
         if getattr(model, "_bhaskera_static_graph", False) or getattr(
             model, "static_graph", False
         ):
@@ -78,6 +70,7 @@ def train(
     *,
     model: torch.nn.Module,
     dataset,
+    val_dataset=None,
     cfg,
     profile: ModelProfile,
     rank: int,
@@ -87,15 +80,6 @@ def train(
 ) -> None:
     """
     Run the training loop.
-    Args:
-        model: Distributed-wrapped model (FSDP2 or DDP).
-        dataset: Ray Dataset pre-tokenized by bhaskera.data.
-        cfg: Bhaskera Config object.
-        profile: ModelProfile from introspection.
-        rank: Global rank of this worker.
-        local_rank: Local GPU index on this host.
-        tracker: Optional logger (MultiLogger from build_logger).
-        world_size: Total number of training ranks.
     """
     device = torch.device(f"cuda:{local_rank}")
     train_cfg = cfg.training
@@ -103,6 +87,9 @@ def train(
 
     optimizer = build_optimizer(model, train_cfg)
     scheduler = build_scheduler(optimizer, train_cfg)
+
+    # Instantiate the Evaluator Orchestrator
+    evaluator = Evaluator(cfg, model, profile, rank, world_size)
 
     model.train()
 
@@ -145,6 +132,8 @@ def train(
         step, best_ckpts = _run_epoch(
             model=model,
             dataset=dataset,
+            val_dataset=val_dataset,
+            evaluator=evaluator,
             optimizer=optimizer,
             scheduler=scheduler,
             cfg=cfg,
@@ -176,6 +165,8 @@ def _run_epoch(
     *,
     model,
     dataset,
+    val_dataset,
+    evaluator,
     optimizer,
     scheduler,
     cfg,
@@ -230,16 +221,13 @@ def _run_epoch(
         device=device,
     )
 
-    # Per-step accumulators
     epoch_loss = 0.0
     epoch_aux_loss = 0.0
     epoch_steps = 0
 
-    # Loss EMA (for spike detection)
     loss_ema: Optional[float] = None
     loss_ema_alpha = 0.05
 
-    # Tokens/samples per accum window — for throughput
     window_hardware_tokens = 0
     window_tokens = 0
     window_samples = 0
@@ -250,7 +238,6 @@ def _run_epoch(
     if throughput is not None:
         throughput.reset_step_clock()
 
-    # ── Training loop ───────────────────────────────────────────────
     loader_iter = iter(loader)
     while step < train_cfg.max_steps:
         micro_losses: list[torch.Tensor] = []
@@ -265,7 +252,6 @@ def _run_epoch(
             try:
                 batch = next(loader_iter)
             except StopIteration:
-                # Epoch exhausted mid-accumulation window — stop cleanly
                 loader_iter = None  # type: ignore[assignment]
                 break
 
@@ -274,11 +260,8 @@ def _run_epoch(
             labels = batch["labels"]
 
             try:
-                # The total compute the GPU is forced to process (including padding)
                 window_hardware_tokens += int(input_ids.numel())
-                # The actual useful data in the batch
                 window_tokens += int(attention_mask.sum().item())
-                
                 window_samples += int(input_ids.size(0))
                 window_seq_len = int(input_ids.size(1))
             except Exception:
@@ -318,11 +301,9 @@ def _run_epoch(
             if aux_loss is not None:
                 micro_aux_losses.append(aux_loss.detach())
 
-        # If loader exhausted mid-window, break the outer loop too
         if loader_iter is None:
             break
 
-        # Ensure sync is re-enabled after the accumulation window
         _set_grad_sync(model, enabled=True)
 
         # ── Optimizer step ──────────────────────────────────────────
@@ -350,7 +331,6 @@ def _run_epoch(
         scheduler.step()
         optimizer.zero_grad(set_to_none=True)
 
-        # ── Loss aggregation ────────────────────────────────────────
         window_loss = torch.stack(micro_losses).mean().item()
         window_aux = (
             torch.stack(micro_aux_losses).mean().item()
@@ -374,7 +354,6 @@ def _run_epoch(
         # ── Throughput ──────────────────────────────────────────────
         throughput_metrics: dict[str, float] = {}
         if throughput is not None:
-            # We pass hardware tokens to calculate the true hardware MFU
             throughput_metrics = throughput.step(
                 local_tokens_in_step=window_hardware_tokens,
                 local_samples_in_step=window_samples,
@@ -386,17 +365,14 @@ def _run_epoch(
                 global_tps = throughput_metrics.get("throughput/tokens_per_sec_global", 0.0)
                 mfu = throughput_metrics.get("throughput/mfu_pct", 0.0)
                 
-                # Calculate the difference between Hardware compute and Useful compute
                 ratio = window_tokens / window_hardware_tokens if window_hardware_tokens > 0 else 1.0
                 useful_global_tps = global_tps * ratio
                 padding_pct = (1.0 - ratio) * 100.0
 
                 print(
-                    f"Step {step_num:.0f} | "
-                    f"HW Tok/s: {global_tps:,.0f} | "
+                    f"Step {step_num:.0f} | HW Tok/s: {global_tps:,.0f} | "
                     f"Useful Tok/s: {useful_global_tps:,.0f} | "
-                    f"Pad Waste: {padding_pct:.1f}% | "
-                    f"HW MFU: {mfu:.2f}%"
+                    f"Pad Waste: {padding_pct:.1f}% | HW MFU: {mfu:.2f}%"
                 )
 
         # ── Logging ────────────────────────────────────────────────
@@ -441,6 +417,29 @@ def _run_epoch(
                         sysm.update(cuda_memory_stats(device))
                 if sysm:
                     tracker.log(sysm, step=step)
+
+        # ── Evaluation & Benchmarking ──────────────────────────────
+        ran_eval = False
+        
+        if evaluator.should_run_validation(step):
+            val_metrics = evaluator.run_validation(val_dataset)
+            if tracker and val_metrics:
+                tracker.log(val_metrics, step=step)
+            if rank == 0 and val_metrics:
+                logger.info(f"\033[1;32m[Validation @ Step {step}] {val_metrics}\033[0m")
+            ran_eval = True
+
+        if evaluator.should_run_benchmark(step):
+            bench_metrics = evaluator.run_benchmarks(tokenizer=None)
+            if tracker and bench_metrics:
+                tracker.log(bench_metrics, step=step)
+            if rank == 0 and bench_metrics:
+                logger.info(f"\033[1;34m[Benchmarks @ Step {step}] {bench_metrics}\033[0m")
+            ran_eval = True
+
+        # Clock protection: Reset throughput step timers if evaluations halted execution
+        if ran_eval and throughput is not None:
+            throughput.reset_step_clock()
 
     if epoch_steps == 0:
         return step, best_ckpts
