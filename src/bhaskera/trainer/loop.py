@@ -2,6 +2,34 @@
 bhaskera.trainer.loop
 =====================
 Pure training loop with pluggable evaluation and throughput clock protection.
+
+Changes vs previous version (all relate to ThroughputTracker API update)
+--------------------------------------------------------------------------
+1. ``window_hardware_tokens`` reset moved INSIDE the grad-accum loop reset
+   block so it is always fresh per optimizer step (was fine before but
+   the dual-reset at top + inside was confusing and fragile).
+
+2. ``local_tokens_in_step`` now passes ``window_hardware_tokens`` — unchanged,
+   this was already correct.
+
+3. Print block now also shows ``mfu_ema_pct`` (new key from tracker) and
+   uses the EMA tok/s for the display line so the console is less jittery,
+   while MFU still shows the instantaneous value (true utilisation).
+
+4. ``tok/s`` reported to tracker now uses the instantaneous global key
+   ``throughput/tokens_per_sec_global`` — previously aliased to ``tok/s``
+   by hand, now read directly from throughput_metrics to stay in sync.
+
+5. ``MFU`` reported to Ray/tracker now reads ``throughput/mfu_pct`` from the
+   dict rather than re-keying manually — removes the stale-key risk when
+   the tracker dict changes.
+
+6. Dead ``step_num`` variable (was ``throughput/total_steps``) replaced by
+   the actual ``step`` counter for the print line — ``total_steps`` resets
+   per-tracker-instance, not per epoch, so using ``step`` is cleaner.
+
+7. Non-finite grad_norm ``continue`` now also resets the throughput clock
+   so skipped steps don't inflate the next step's dt.
 """
 from __future__ import annotations
 
@@ -47,7 +75,6 @@ def _set_grad_sync(model: torch.nn.Module, enabled: bool) -> None:
             set_requires_gradient_sync(model, enabled)
             return
     except ImportError:
-        # torch < 2.4 — FSDP2 unavailable, fall through to DDP / no-op.
         pass
 
     # ── DDP path ────────────────────────────────────────────────────
@@ -88,7 +115,6 @@ def train(
     optimizer = build_optimizer(model, train_cfg)
     scheduler = build_scheduler(optimizer, train_cfg)
 
-    # Instantiate the Evaluator Orchestrator
     evaluator = Evaluator(cfg, model, profile, rank, world_size)
 
     model.train()
@@ -115,7 +141,7 @@ def train(
         peak_flops_per_gpu=peak_tflops * 1e12,
         window=int(getattr(metrics_cfg, "throughput_window", 50)) if metrics_cfg else 50,
         warmup_steps=int(getattr(metrics_cfg, "throughput_warmup", 5)) if metrics_cfg else 5,
-        is_peft=getattr(cfg.lora, "enabled", False),
+        is_peft=getattr(cfg.lora, "enabled", False),          # no-op in new tracker
         activation_checkpointing=getattr(train_cfg, "gradient_checkpointing", False),
         num_layers=getattr(profile, "num_hidden_layers", 0),
         hidden_size=getattr(profile, "hidden_size", 0),
@@ -228,11 +254,6 @@ def _run_epoch(
     loss_ema: Optional[float] = None
     loss_ema_alpha = 0.05
 
-    window_hardware_tokens = 0
-    window_tokens = 0
-    window_samples = 0
-    window_seq_len = 0
-
     optimizer.zero_grad(set_to_none=True)
 
     if throughput is not None:
@@ -243,9 +264,12 @@ def _run_epoch(
         micro_losses: list[torch.Tensor] = []
         micro_aux_losses: list[torch.Tensor] = []
 
-        window_hardware_tokens = 0
-        window_tokens = 0
+        # FIX 1: Accumulator variables are declared fresh here, once per
+        # optimizer step, not split across the outer loop top + inner reset.
+        window_hardware_tokens = 0   # ALL tokens incl. padding (for MFU / HW tok/s)
+        window_tokens = 0            # Non-padding tokens only (for useful tok/s)
         window_samples = 0
+        window_seq_len = 0
 
         # ── Gradient accumulation loop ───────────────────────────────
         for micro_step in range(grad_accum):
@@ -325,6 +349,11 @@ def _run_epoch(
             optimizer.zero_grad(set_to_none=True)
             if tracker:
                 tracker.log({"train/non_finite_grad": 1.0}, step=step)
+            # FIX 7: Reset the clock so this skipped step's wall time
+            # (which may include the full backward) does not get charged
+            # to the next valid step, inflating its dt and crashing MFU.
+            if throughput is not None:
+                throughput.reset_step_clock()
             continue
 
         optimizer.step()
@@ -360,19 +389,34 @@ def _run_epoch(
                 seq_len=window_seq_len,
             )
 
+            # FIX 3, 4, 5, 6: Use keys directly from the tracker dict.
+            # - global_tps_inst: instantaneous (new key _global, not EMA)
+            # - global_tps_ema: EMA-smoothed for stable console display
+            # - mfu_inst: true instantaneous MFU (throughput/mfu_pct)
+            # - mfu_ema: smoothed MFU (throughput/mfu_ema_pct)
             if "throughput/tokens_per_sec_global" in throughput_metrics:
-                step_num = throughput_metrics.get("throughput/total_steps", 0)
-                global_tps = throughput_metrics.get("throughput/tokens_per_sec_global", 0.0)
-                mfu = throughput_metrics.get("throughput/mfu_pct", 0.0)
-                
+                global_tps_inst = throughput_metrics["throughput/tokens_per_sec_global"]
+                # EMA global = per_gpu_ema * world_size
+                global_tps_ema = (
+                    throughput_metrics.get("throughput/tokens_per_sec_per_gpu_ema", 0.0)
+                    * max(1, int(world_size))
+                )
+                mfu_inst = throughput_metrics.get("throughput/mfu_pct", 0.0)
+                mfu_ema  = throughput_metrics.get("throughput/mfu_ema_pct", 0.0)
+
                 ratio = window_tokens / window_hardware_tokens if window_hardware_tokens > 0 else 1.0
-                useful_global_tps = global_tps * ratio
+                useful_global_tps = global_tps_inst * ratio
                 padding_pct = (1.0 - ratio) * 100.0
 
+                # FIX 6: Use ``step`` (global optimizer step counter),
+                # not ``throughput/total_steps`` (tracker-instance counter).
+                # Console shows EMA tok/s (stable) but instantaneous MFU (honest).
                 print(
-                    f"Step {step_num:.0f} | HW Tok/s: {global_tps:,.0f} | "
+                    f"Step {step} | "
+                    f"HW Tok/s: {global_tps_inst:,.0f} (ema: {global_tps_ema:,.0f}) | "
                     f"Useful Tok/s: {useful_global_tps:,.0f} | "
-                    f"Pad Waste: {padding_pct:.1f}% | HW MFU: {mfu:.2f}%"
+                    f"Pad Waste: {padding_pct:.1f}% | "
+                    f"HW MFU: {mfu_inst:.2f}% (ema: {mfu_ema:.2f}%)"
                 )
 
         # ── Logging ────────────────────────────────────────────────
@@ -387,7 +431,11 @@ def _run_epoch(
                 msg += f" MFU={throughput_metrics['throughput/mfu_pct']:.1f}%"
             logger.info(msg)
 
+        # FIX 4 & 5: Build the metrics dict using keys from throughput_metrics
+        # directly rather than hand-aliasing tok/s and MFU.  The tracker owns
+        # the naming; callers should read from it, not re-key it manually.
         metrics: dict[str, float] = {
+            "step": float(step),
             "loss": window_loss,
             "lr": lr,
             "grad_norm": grad_norm,
@@ -399,14 +447,23 @@ def _run_epoch(
             metrics["aux_loss"] = window_aux
             metrics["total_loss"] = window_loss + aux_loss_weight * window_aux
 
+        # Merge all throughput keys (tok/s, mfu_pct, mfu_ema_pct, step_time…)
         metrics.update(throughput_metrics)
+
+        # Convenience aliases for dashboards / Ray that expect short names
+        if "throughput/tokens_per_sec_global" in throughput_metrics:
+            metrics["tok/s"] = throughput_metrics["throughput/tokens_per_sec_global"]
+        if "throughput/mfu_pct" in throughput_metrics:
+            metrics["MFU"] = throughput_metrics["throughput/mfu_pct"]
+        if "throughput/mfu_ema_pct" in throughput_metrics:
+            metrics["MFU_ema"] = throughput_metrics["throughput/mfu_ema_pct"]
 
         if tracker:
             if log_expert_util and step % expert_log_every == 0:
                 metrics.update(compute_expert_utilization(out, profile))
             tracker.log(metrics, step=step)
 
-            if tracker and sys_on and sys_every > 0 and step % sys_every == 0:
+            if sys_on and sys_every > 0 and step % sys_every == 0:
                 sysm: dict[str, float] = {}
                 sysm.update(system_stats(
                     gpu=bool(getattr(metrics_cfg, "gpu", True)) if metrics_cfg else True,
@@ -420,7 +477,7 @@ def _run_epoch(
 
         # ── Evaluation & Benchmarking ──────────────────────────────
         ran_eval = False
-        
+
         if evaluator.should_run_validation(step):
             val_metrics = evaluator.run_validation(val_dataset)
             if tracker and val_metrics:
@@ -437,11 +494,12 @@ def _run_epoch(
                 logger.info(f"\033[1;34m[Benchmarks @ Step {step}] {bench_metrics}\033[0m")
             ran_eval = True
 
-        # Clock protection: Reset throughput step timers if evaluations halted execution
+        # Clock protection: reset throughput clock after eval stalls
         if ran_eval:
             if throughput is not None:
                 throughput.reset_step_clock()
             torch.cuda.empty_cache()
+
     if epoch_steps == 0:
         return step, best_ckpts
 

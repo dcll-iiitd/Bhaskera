@@ -10,7 +10,7 @@
 # =============================================================================
 
 #SBATCH --job-name=bhaskera
-#SBATCH --nodes=2
+#SBATCH --nodes=5
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
