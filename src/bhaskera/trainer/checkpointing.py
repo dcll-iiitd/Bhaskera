@@ -32,6 +32,7 @@ def save_and_prune(
     ckpt_cfg,
     rank: int,
     best_ckpts: list[tuple[float, str]],
+    cursor_meta: dict | None = None,
 ) -> list[tuple[float, str]]:
     """
     Save a checkpoint directory and prune down to ckpt_cfg.keep_last_n
@@ -50,6 +51,7 @@ def save_and_prune(
         step=step,
         path=ckpt_path,
         extra={"avg_loss": float(avg_loss)},
+        cursor_meta=cursor_meta,
     )
 
     # Only rank 0 manages the "best" list on disk.
@@ -67,15 +69,17 @@ def save_and_prune(
     return best_ckpts
 
 
-def maybe_resume(model, optimizer, save_dir: str) -> int:
-    """Resume from the highest-step checkpoint directory under `save_dir`."""
+def maybe_resume(model, optimizer, save_dir: str) -> tuple[int, dict]:
+    """Resume from the highest-step checkpoint directory under `save_dir`.
+    Returns (step, meta_dict). meta_dict contains all meta.json keys
+    including eval_lifecycle/* cursor keys when present."""
     if not Path(save_dir).exists():
-        return 0
-
+        return 0, {}
+ 
     candidates = [p for p in Path(save_dir).iterdir() if p.is_dir() and _STEP_RE.search(p.name)]
     if not candidates:
-        return 0
-
+        return 0, {}
+ 
     latest = max(candidates, key=_step_of)
     logger.info(f"Resuming from {latest}")
     return load_checkpoint(model, optimizer, str(latest))

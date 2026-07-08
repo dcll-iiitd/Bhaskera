@@ -3,33 +3,31 @@ bhaskera.trainer.loop
 =====================
 Pure training loop with pluggable evaluation and throughput clock protection.
 
-Changes vs previous version (all relate to ThroughputTracker API update)
---------------------------------------------------------------------------
-1. ``window_hardware_tokens`` reset moved INSIDE the grad-accum loop reset
-   block so it is always fresh per optimizer step (was fine before but
-   the dual-reset at top + inside was confusing and fragile).
+Changes vs previous version
+----------------------------
+1. Integrated EvaluationLifecycle for production-grade GPU memory reclamation
+   before evaluation. The old inline evaluator.run_validation() / run_benchmarks()
+   calls are replaced by a lifecycle context manager that:
+     - zeros gradients and destroys the Ray Data iterator before eval
+     - offloads optimizer state to CPU (configurable via cfg.evaluation.offload_optimizer)
+     - runs evaluation inside torch.inference_mode()
+     - restores optimizer from CPU and rebuilds the iterator after eval
+     - resumes from exactly the same sample position
 
-2. ``local_tokens_in_step`` now passes ``window_hardware_tokens`` — unchanged,
-   this was already correct.
+2. DatasetCursor tracks samples_consumed / tokens_consumed per epoch so the
+   iterator can be fast-forwarded after a checkpoint resume via dataset.skip(n).
 
-3. Print block now also shows ``mfu_ema_pct`` (new key from tracker) and
-   uses the EMA tok/s for the display line so the console is less jittery,
-   while MFU still shows the instantaneous value (true utilisation).
+3. maybe_resume now returns (step, meta_dict); the meta_dict carries
+   eval_lifecycle/* keys that reconstruct the cursor.
 
-4. ``tok/s`` reported to tracker now uses the instantaneous global key
-   ``throughput/tokens_per_sec_global`` — previously aliased to ``tok/s``
-   by hand, now read directly from throughput_metrics to stay in sync.
+4. save_and_prune now receives cursor_meta so the cursor is embedded in
+   meta.json at every checkpoint.
 
-5. ``MFU`` reported to Ray/tracker now reads ``throughput/mfu_pct`` from the
-   dict rather than re-keying manually — removes the stale-key risk when
-   the tracker dict changes.
+5. Non-finite grad_norm skip now resets the throughput clock so the skipped
+   step's wall-time does not inflate the next valid step's dt.
 
-6. Dead ``step_num`` variable (was ``throughput/total_steps``) replaced by
-   the actual ``step`` counter for the print line — ``total_steps`` resets
-   per-tracker-instance, not per epoch, so using ``step`` is cleaner.
-
-7. Non-finite grad_norm ``continue`` now also resets the throughput clock
-   so skipped steps don't inflate the next step's dt.
+6. ray_dataset_shard param added to train() and _run_epoch() so the lifecycle
+   can rebuild the Ray Data iterator independently of the epoch-level dataset arg.
 """
 from __future__ import annotations
 
@@ -46,12 +44,20 @@ from bhaskera.introspect import ModelProfile
 from bhaskera.utils import ThroughputTracker
 from bhaskera.utils.system_stats import system_stats, cuda_memory_stats
 from .checkpointing import maybe_resume, save_and_prune
+from .eval_lifecycle import (
+    DatasetCursor,
+    EvaluationLifecycle,
+    TrainingPipelineState,
+    cursor_from_checkpoint_metadata,
+    cursor_to_checkpoint_metadata,
+)
 from .moe import compute_expert_utilization, extract_aux_loss
 from .optim import build_optimizer, build_scheduler
 from .precision import resolve_autocast_dtype
 from bhaskera.evaluation import Evaluator
 
 logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # FSDP2 + DDP gradient-sync helper
@@ -75,6 +81,7 @@ def _set_grad_sync(model: torch.nn.Module, enabled: bool) -> None:
             set_requires_gradient_sync(model, enabled)
             return
     except ImportError:
+        # torch < 2.4 — FSDP2 unavailable, fall through to DDP / no-op.
         pass
 
     # ── DDP path ────────────────────────────────────────────────────
@@ -104,9 +111,18 @@ def train(
     local_rank: int,
     tracker=None,
     world_size: int = 1,
+    ray_dataset_shard=None,
 ) -> None:
     """
     Run the training loop.
+
+    Args:
+        ray_dataset_shard:  The raw Ray Dataset shard for this rank, obtained
+                            via ray.train.get_dataset_shard("train") in worker.py.
+                            Passed through to _run_epoch so the EvaluationLifecycle
+                            can rebuild the iterator via dataset.skip(n) after eval.
+                            If None (e.g. single-GPU debug without Ray), the old
+                            in-line eval path is used as a fallback.
     """
     device = torch.device(f"cuda:{local_rank}")
     train_cfg = cfg.training
@@ -115,14 +131,22 @@ def train(
     optimizer = build_optimizer(model, train_cfg)
     scheduler = build_scheduler(optimizer, train_cfg)
 
+    # Instantiate the Evaluator Orchestrator
     evaluator = Evaluator(cfg, model, profile, rank, world_size)
 
     model.train()
 
     step = 0
+    _resume_meta: dict = {}
     if ckpt_cfg.enabled:
-        step = maybe_resume(model, optimizer, ckpt_cfg.save_dir)
+        step, _resume_meta = maybe_resume(model, optimizer, ckpt_cfg.save_dir)
         model.train()
+
+    # Restore dataset cursor from checkpoint so the iterator can be
+    # fast-forwarded to the exact position the run was interrupted at.
+    _resume_cursor = cursor_from_checkpoint_metadata(_resume_meta)
+    _samples_consumed: int = _resume_cursor.samples_consumed
+    _tokens_consumed: int  = _resume_cursor.tokens_consumed
 
     best_ckpts: list[tuple[float, str]] = []
 
@@ -141,7 +165,7 @@ def train(
         peak_flops_per_gpu=peak_tflops * 1e12,
         window=int(getattr(metrics_cfg, "throughput_window", 50)) if metrics_cfg else 50,
         warmup_steps=int(getattr(metrics_cfg, "throughput_warmup", 5)) if metrics_cfg else 5,
-        is_peft=getattr(cfg.lora, "enabled", False),          # no-op in new tracker
+        is_peft=getattr(cfg.lora, "enabled", False),
         activation_checkpointing=getattr(train_cfg, "gradient_checkpointing", False),
         num_layers=getattr(profile, "num_hidden_layers", 0),
         hidden_size=getattr(profile, "hidden_size", 0),
@@ -155,7 +179,7 @@ def train(
         }, step=0)
 
     for epoch in range(train_cfg.num_epochs):
-        step, best_ckpts = _run_epoch(
+        step, best_ckpts, _samples_consumed, _tokens_consumed = _run_epoch(
             model=model,
             dataset=dataset,
             val_dataset=val_dataset,
@@ -173,7 +197,15 @@ def train(
             best_ckpts=best_ckpts,
             throughput=throughput,
             world_size=world_size,
+            ray_dataset_shard=ray_dataset_shard,
+            samples_consumed=_samples_consumed,
+            tokens_consumed=_tokens_consumed,
         )
+        # After each epoch the position resets to 0 (new epoch starts from
+        # the beginning of the dataset). The cursor from a checkpoint only
+        # applies to the first epoch after resume.
+        _samples_consumed = 0
+        _tokens_consumed  = 0
         if step >= train_cfg.max_steps:
             break
 
@@ -206,6 +238,9 @@ def _run_epoch(
     best_ckpts,
     throughput: Optional[ThroughputTracker],
     world_size: int,
+    ray_dataset_shard=None,
+    samples_consumed: int = 0,
+    tokens_consumed: int = 0,
 ):
     train_cfg = cfg.training
     ckpt_cfg = cfg.checkpoint
@@ -230,7 +265,19 @@ def _run_epoch(
     sys_on = bool(getattr(metrics_cfg, "enabled", True)) if metrics_cfg else True
 
     # ── Data loader ─────────────────────────────────────────────────
-    loader = dataset.iter_torch_batches(
+    # On checkpoint resume, fast-forward the iterator past already-consumed
+    # samples using dataset.skip(n). This is O(num_parquet_files), not
+    # O(samples_consumed), so it is cheap even for large positions.
+    _raw_dataset = dataset
+    if samples_consumed > 0 and ray_dataset_shard is not None:
+        if rank == 0:
+            logger.info(
+                f"[loop] Checkpoint resume: skipping {samples_consumed} "
+                f"already-consumed samples via dataset.skip()"
+            )
+        _raw_dataset = ray_dataset_shard.skip(samples_consumed)
+
+    loader = _raw_dataset.iter_torch_batches(
         batch_size=train_cfg.batch_size,
         local_shuffle_buffer_size=max(
             train_cfg.batch_size * cfg.data.local_shuffle_buffer_multiplier,
@@ -254,6 +301,18 @@ def _run_epoch(
     loss_ema: Optional[float] = None
     loss_ema_alpha = 0.05
 
+    # Running position counters for this epoch.
+    # Initialised from the checkpoint cursor (non-zero only on resume).
+    _step_samples_consumed: int = samples_consumed
+    _step_tokens_consumed: int  = tokens_consumed
+
+    # Pre-declare window accumulators so they exist if the while loop
+    # body never executes (e.g. dataset is empty on this rank).
+    window_hardware_tokens = 0
+    window_tokens = 0
+    window_samples = 0
+    window_seq_len = 0
+
     optimizer.zero_grad(set_to_none=True)
 
     if throughput is not None:
@@ -264,10 +323,9 @@ def _run_epoch(
         micro_losses: list[torch.Tensor] = []
         micro_aux_losses: list[torch.Tensor] = []
 
-        # FIX 1: Accumulator variables are declared fresh here, once per
-        # optimizer step, not split across the outer loop top + inner reset.
-        window_hardware_tokens = 0   # ALL tokens incl. padding (for MFU / HW tok/s)
-        window_tokens = 0            # Non-padding tokens only (for useful tok/s)
+        # Reset window accumulators at the start of each optimizer step.
+        window_hardware_tokens = 0
+        window_tokens = 0
         window_samples = 0
         window_seq_len = 0
 
@@ -284,10 +342,18 @@ def _run_epoch(
             labels = batch["labels"]
 
             try:
+                _bs  = int(input_ids.size(0))
+                _seq = int(input_ids.size(1))
                 window_hardware_tokens += int(input_ids.numel())
                 window_tokens += int(attention_mask.sum().item())
-                window_samples += int(input_ids.size(0))
-                window_seq_len = int(input_ids.size(1))
+                window_samples += _bs
+                window_seq_len = _seq
+                # Increment BEFORE the forward pass so that if the process
+                # is interrupted mid-step, the cursor points to the start
+                # of the interrupted step and those samples are re-processed
+                # on resume (they did not complete an optimizer step).
+                _step_samples_consumed += _bs
+                _step_tokens_consumed  += _bs * _seq
             except Exception:
                 pass
 
@@ -349,9 +415,9 @@ def _run_epoch(
             optimizer.zero_grad(set_to_none=True)
             if tracker:
                 tracker.log({"train/non_finite_grad": 1.0}, step=step)
-            # FIX 7: Reset the clock so this skipped step's wall time
-            # (which may include the full backward) does not get charged
-            # to the next valid step, inflating its dt and crashing MFU.
+            # Reset the throughput clock so this skipped step's wall-time
+            # (which includes the full backward) does not inflate the next
+            # valid step's dt and crash the MFU calculation.
             if throughput is not None:
                 throughput.reset_step_clock()
             continue
@@ -389,34 +455,18 @@ def _run_epoch(
                 seq_len=window_seq_len,
             )
 
-            # FIX 3, 4, 5, 6: Use keys directly from the tracker dict.
-            # - global_tps_inst: instantaneous (new key _global, not EMA)
-            # - global_tps_ema: EMA-smoothed for stable console display
-            # - mfu_inst: true instantaneous MFU (throughput/mfu_pct)
-            # - mfu_ema: smoothed MFU (throughput/mfu_ema_pct)
             if "throughput/tokens_per_sec_global" in throughput_metrics:
-                global_tps_inst = throughput_metrics["throughput/tokens_per_sec_global"]
-                # EMA global = per_gpu_ema * world_size
-                global_tps_ema = (
-                    throughput_metrics.get("throughput/tokens_per_sec_per_gpu_ema", 0.0)
-                    * max(1, int(world_size))
-                )
-                mfu_inst = throughput_metrics.get("throughput/mfu_pct", 0.0)
-                mfu_ema  = throughput_metrics.get("throughput/mfu_ema_pct", 0.0)
+                global_tps = throughput_metrics.get("throughput/tokens_per_sec_global", 0.0)
+                mfu = throughput_metrics.get("throughput/mfu_pct", 0.0)
 
                 ratio = window_tokens / window_hardware_tokens if window_hardware_tokens > 0 else 1.0
-                useful_global_tps = global_tps_inst * ratio
+                useful_global_tps = global_tps * ratio
                 padding_pct = (1.0 - ratio) * 100.0
 
-                # FIX 6: Use ``step`` (global optimizer step counter),
-                # not ``throughput/total_steps`` (tracker-instance counter).
-                # Console shows EMA tok/s (stable) but instantaneous MFU (honest).
                 print(
-                    f"Step {step} | "
-                    f"HW Tok/s: {global_tps_inst:,.0f} (ema: {global_tps_ema:,.0f}) | "
+                    f"Step {step} | HW Tok/s: {global_tps:,.0f} | "
                     f"Useful Tok/s: {useful_global_tps:,.0f} | "
-                    f"Pad Waste: {padding_pct:.1f}% | "
-                    f"HW MFU: {mfu_inst:.2f}% (ema: {mfu_ema:.2f}%)"
+                    f"Pad Waste: {padding_pct:.1f}% | HW MFU: {mfu:.2f}%"
                 )
 
         # ── Logging ────────────────────────────────────────────────
@@ -431,11 +481,7 @@ def _run_epoch(
                 msg += f" MFU={throughput_metrics['throughput/mfu_pct']:.1f}%"
             logger.info(msg)
 
-        # FIX 4 & 5: Build the metrics dict using keys from throughput_metrics
-        # directly rather than hand-aliasing tok/s and MFU.  The tracker owns
-        # the naming; callers should read from it, not re-key it manually.
         metrics: dict[str, float] = {
-            "step": float(step),
             "loss": window_loss,
             "lr": lr,
             "grad_norm": grad_norm,
@@ -447,16 +493,7 @@ def _run_epoch(
             metrics["aux_loss"] = window_aux
             metrics["total_loss"] = window_loss + aux_loss_weight * window_aux
 
-        # Merge all throughput keys (tok/s, mfu_pct, mfu_ema_pct, step_time…)
         metrics.update(throughput_metrics)
-
-        # Convenience aliases for dashboards / Ray that expect short names
-        if "throughput/tokens_per_sec_global" in throughput_metrics:
-            metrics["tok/s"] = throughput_metrics["throughput/tokens_per_sec_global"]
-        if "throughput/mfu_pct" in throughput_metrics:
-            metrics["MFU"] = throughput_metrics["throughput/mfu_pct"]
-        if "throughput/mfu_ema_pct" in throughput_metrics:
-            metrics["MFU_ema"] = throughput_metrics["throughput/mfu_ema_pct"]
 
         if tracker:
             if log_expert_util and step % expert_log_every == 0:
@@ -477,31 +514,88 @@ def _run_epoch(
 
         # ── Evaluation & Benchmarking ──────────────────────────────
         ran_eval = False
+        _needs_val   = evaluator.should_run_validation(step)
+        _needs_bench = evaluator.should_run_benchmark(step)
 
-        if evaluator.should_run_validation(step):
-            val_metrics = evaluator.run_validation(val_dataset)
-            if tracker and val_metrics:
-                tracker.log(val_metrics, step=step)
-            if rank == 0 and val_metrics:
-                logger.info(f"\033[1;32m[Validation @ Step {step}] {val_metrics}\033[0m")
+        if (_needs_val or _needs_bench) and ray_dataset_shard is not None:
+            # ── Production path: full lifecycle teardown + rebuild ──────
+            # Tears down all training-only GPU allocations before eval,
+            # runs eval on the same model instance, then rebuilds the
+            # training pipeline and resumes from the exact same position.
+            _offload = getattr(
+                getattr(cfg, "evaluation", None), "offload_optimizer", True
+            )
+            _cursor = DatasetCursor(
+                samples_consumed=_step_samples_consumed,
+                tokens_consumed=_step_tokens_consumed,
+                global_step=step,
+                epoch=epoch,
+            )
+            _pipeline_state = TrainingPipelineState(
+                optimizer=optimizer,
+                scheduler=scheduler,
+                cursor=_cursor,
+                grad_accum_steps=grad_accum,
+                autocast_ctx_fn=contextlib.nullcontext,
+            )
+            _lifecycle = EvaluationLifecycle(
+                model=model,
+                pipeline_state=_pipeline_state,
+                device=device,
+                cfg=cfg,
+                ray_dataset_shard=ray_dataset_shard,
+                rank=rank,
+                offload_optimizer=_offload,
+            )
+            with _lifecycle.run(loader_iter=loader_iter, loader=loader):
+                # Inside this block:
+                #   - model is in eval mode inside torch.inference_mode()
+                #   - optimizer state is on CPU (if offload_optimizer=True)
+                #   - loader_iter has been destroyed and its memory freed
+                if _needs_val:
+                    val_metrics = evaluator.run_validation(val_dataset)
+                    if tracker and val_metrics:
+                        tracker.log(val_metrics, step=step)
+                    if rank == 0 and val_metrics:
+                        logger.info(f"\033[1;32m[Validation @ Step {step}] {val_metrics}\033[0m")
+                if _needs_bench:
+                    bench_metrics = evaluator.run_benchmarks(tokenizer=None)
+                    if tracker and bench_metrics:
+                        tracker.log(bench_metrics, step=step)
+                    if rank == 0 and bench_metrics:
+                        logger.info(f"\033[1;34m[Benchmarks @ Step {step}] {bench_metrics}\033[0m")
+
+            # After the context exits: model is back in train mode, optimizer
+            # is back on GPU, and the iterator has been rebuilt at the cursor
+            # position. Replace the (now-destroyed) iterator reference.
+            loader_iter = _lifecycle.rebuilt_iterator
             ran_eval = True
 
-        if evaluator.should_run_benchmark(step):
-            bench_metrics = evaluator.run_benchmarks(tokenizer=None)
-            if tracker and bench_metrics:
-                tracker.log(bench_metrics, step=step)
-            if rank == 0 and bench_metrics:
-                logger.info(f"\033[1;34m[Benchmarks @ Step {step}] {bench_metrics}\033[0m")
+        elif _needs_val or _needs_bench:
+            # ── Fallback: no Ray shard (single-GPU debug without Ray) ──
+            # Uses the old in-line path without lifecycle teardown.
+            if _needs_val:
+                val_metrics = evaluator.run_validation(val_dataset)
+                if tracker and val_metrics:
+                    tracker.log(val_metrics, step=step)
+                if rank == 0 and val_metrics:
+                    logger.info(f"\033[1;32m[Validation @ Step {step}] {val_metrics}\033[0m")
+            if _needs_bench:
+                bench_metrics = evaluator.run_benchmarks(tokenizer=None)
+                if tracker and bench_metrics:
+                    tracker.log(bench_metrics, step=step)
+                if rank == 0 and bench_metrics:
+                    logger.info(f"\033[1;34m[Benchmarks @ Step {step}] {bench_metrics}\033[0m")
             ran_eval = True
 
-        # Clock protection: reset throughput clock after eval stalls
-        if ran_eval:
-            if throughput is not None:
-                throughput.reset_step_clock()
-            torch.cuda.empty_cache()
+        # Clock protection: Reset throughput step timers if evaluations
+        # halted execution so the eval wall-time is not charged to the
+        # first training step after eval.
+        if ran_eval and throughput is not None:
+            throughput.reset_step_clock()
 
     if epoch_steps == 0:
-        return step, best_ckpts
+        return step, best_ckpts, _step_samples_consumed, _step_tokens_consumed
 
     avg_loss = epoch_loss / epoch_steps
     if rank == 0:
@@ -517,6 +611,12 @@ def _run_epoch(
 
     # ── Checkpoint ──────────────────────────────────────────────────
     if ckpt_cfg.enabled and (epoch + 1) % ckpt_cfg.save_interval == 0:
+        _ckpt_cursor = DatasetCursor(
+            samples_consumed=_step_samples_consumed,
+            tokens_consumed=_step_tokens_consumed,
+            global_step=step,
+            epoch=epoch,
+        )
         best_ckpts = save_and_prune(
             model=model,
             optimizer=optimizer,
@@ -525,6 +625,7 @@ def _run_epoch(
             ckpt_cfg=ckpt_cfg,
             rank=rank,
             best_ckpts=best_ckpts,
+            cursor_meta=cursor_to_checkpoint_metadata(_ckpt_cursor),
         )
 
-    return step, best_ckpts
+    return step, best_ckpts, _step_samples_consumed, _step_tokens_consumed

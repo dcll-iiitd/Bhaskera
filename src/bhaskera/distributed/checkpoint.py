@@ -109,6 +109,7 @@ def save_checkpoint(
     extra: dict | None = None,
     rank: int = 0,
     keep_last_n: int = 3,
+    cursor_meta: dict | None = None,
 ) -> None:
     """
     Save a sharded checkpoint atomically.
@@ -167,6 +168,8 @@ def save_checkpoint(
         meta: dict = {"step": int(step)}
         if extra:
             meta.update(extra)
+        if cursor_meta:
+            meta.update(cursor_meta)
         with open(os.path.join(path, "meta.json"), "w") as f:
             json.dump(meta, f)
 
@@ -195,11 +198,13 @@ def maybe_resume(
     Scan save_dir for the latest checkpoint that has a .complete sentinel.
     Load it in-place and return the step to resume from.
 
-    Returns 0 if no valid checkpoint is found (fresh start).
+     Returns (0, {}) if no valid checkpoint is found (fresh start).
+    Returns (step, meta_dict) where meta_dict contains all keys from
+    meta.json, including eval_lifecycle/* cursor keys when present.
     """
     if not os.path.isdir(save_dir):
         logger.info("No checkpoint directory found. Starting from step 0.")
-        return 0
+        return 0, {}
 
     candidates = sorted([
         p for p in Path(save_dir).iterdir()
@@ -210,7 +215,7 @@ def maybe_resume(
 
     if not candidates:
         logger.info("No valid checkpoints found (missing .complete sentinel). Starting from step 0.")
-        return 0
+        return 0,{}
 
     ckpt_path  = str(candidates[-1])
     start_step = int(_STEP_RE.search(ckpt_path).group(1))
@@ -233,13 +238,14 @@ def maybe_resume(
 
     # Read step from meta.json (ground truth)
     meta_path = os.path.join(ckpt_path, "meta.json")
+    meta: dict = {}
     if os.path.exists(meta_path):
         with open(meta_path) as f:
             meta = json.load(f)
         start_step = int(meta.get("step", start_step))
 
     logger.info(f"Resume complete — starting from step {start_step}")
-    return start_step
+    return start_step,meta
 
 
 # ---------------------------------------------------------------------------

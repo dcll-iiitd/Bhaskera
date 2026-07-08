@@ -102,6 +102,7 @@ class BenchmarksConfig:
 @dataclass
 class EvaluationConfig:
     enabled: bool = False
+    offload_optimizer: bool = True
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     benchmarks: BenchmarksConfig = field(default_factory=BenchmarksConfig)
 

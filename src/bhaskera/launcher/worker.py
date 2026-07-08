@@ -17,6 +17,7 @@ from bhaskera.config import Config
 from bhaskera.distributed import wrap_model
 from bhaskera.models import build_model
 from bhaskera.trainer import train
+from bhaskera.trainer.eval_lifecycle import DatasetCursor
 from bhaskera.utils import build_logger
 from bhaskera.plugins.loader import load_plugins
 
@@ -79,6 +80,7 @@ def worker_fn(cfg_dict: dict) -> None:
         local_rank=local_rank,
         tracker=tracker,
         world_size=world_size,
+        ray_dataset_shard=dataset,
     )
 
 

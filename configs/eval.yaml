@@ -22,7 +22,7 @@ lora:
   enabled: false
 
 training:
-  batch_size: 50
+  batch_size: 70
   grad_accum: 4
   
   # Global fallbacks if not defined inside kwargs
@@ -56,7 +56,7 @@ training:
 # ── Pluggable Evaluation Subsystem Configuration ──
 evaluation:
   enabled: true
-
+  offload_optimizer: true
   validation:
     dataset: "validation"
     every_n_steps: 40
