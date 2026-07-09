@@ -13,11 +13,13 @@
    - 4.1 [`config`](#41-config--single-source-of-truth)
    - 4.2 [`introspect`](#42-introspect--structural-model-detection)
    - 4.3 [`data`](#43-data--ray-data-pipeline-and-persistent-tokenization)
-   - 4.4 [`models`](#44-models--hf-loader-liger-kernel-lora)
+   - 4.4 [`models`](#44-models--hf-loader-liger-kernel-lora-qlora)
    - 4.5 [`distributed`](#45-distributed--fsdp2-ddp-and-dcp-checkpointing)
    - 4.6 [`trainer`](#46-trainer--the-pure-training-loop)
    - 4.7 [`launcher`](#47-launcher--cli-entry-points)
    - 4.8 [`utils`](#48-utils--telemetry-throughput-loggers)
+   - 4.9 [`evaluation`](#49-evaluation--distributed-validation-and-benchmarks)
+   - 4.10 [`plugins`](#410-plugins--optimizer-metric-and-benchmark-extensions)
 5. [Cross-cutting design decisions](#5-cross-cutting-design-decisions)
 6. [Data flow](#6-data-flow)
 7. [Extension guide](#7-extension-guide)
@@ -33,11 +35,15 @@ Bhaskera is a **Ray-native distributed LLM training and inference framework** bu
 - **Distributed training** with FSDP2 (composable `fully_shard`) or DDP, chosen via config.
 - **MoE support** for any model where the architecture is statically describable — Mixtral, Qwen2MoE, DeepSeek, Param2-17B-A2.4B-Thinking, and any future architecture that follows the `experts: nn.ModuleList` convention.
 - **LoRA / PEFT** with auto-discovered target modules (no model-specific hardcoding).
+- **QLoRA** via BitsAndBytes NF4 4-bit quantization, constrained to the DDP strategy (FSDP2 is incompatible with `Params4bit` tensors and is rejected at config validation time).
 - **Ray Data**-driven dataset pipeline with a **persistent tokenization cache** keyed on `(model_name, seq_len, dataset_name, format)`.
+- **Continual Pre-Training (CPT)** via a continuous sequence-packing mode (`is_cpt: true`) for local JSONL corpora.
 - **Pluggable chat-data renderers** (ChatML / Alpaca / ShareGPT / custom) via a decorator-based registry.
 - **Sharded checkpointing** using `torch.distributed.checkpoint` (DCP) with atomic write semantics.
 - **Push-based observability** via MLflow over a shared `$HOME` filesystem (no Prometheus / Grafana / auth required) plus the Ray Dashboard, with optional W&B fan-out.
 - **Inference engine** with TurboQuant KV-cache quantisation and speculative decoding.
+- **Pluggable evaluation subsystem** — in-training distributed validation (loss, perplexity, token accuracy) and LM benchmarks (HellaSwag, ARC-Easy, ARC-Challenge) with a `@register_benchmark` / `@register_metric` decorator API.
+- **Pluggable optimizer system** — built-in PyTorch optimizers selectable by class name, and fully custom optimizers registered via `@register_optimizer` plugins.
 - **SLURM-aware launch** with NCCL auto-tuning for InfiniBand / RoCE / TCP.
 
 The design ethos is **"zero hardcoded model names anywhere"**: every architecture-dependent decision is delegated to a single introspection pass that produces a `ModelProfile`, and every downstream subsystem consumes that profile. This is the property that makes the framework extensible to a new architecture without touching the trainer, distributed wrap, LoRA, MoE loss, or checkpointing code.
@@ -78,8 +84,11 @@ The design ethos is **"zero hardcoded model names anywhere"**: every architectur
 │         │                                                        │
 │         ▼                                                        │
 │  trainer.train ──► gradient accumulation loop ──► DCP checkpoint │
-│         │                ▲                                       │
-│         │                │                                       │
+│         │         ▲             │                                │
+│         │         │             ▼                                │
+│         │         │   EvaluationLifecycle                        │
+│         │         │   (validation + benchmarks mid-training)     │
+│         │         │                                              │
 │         │       ray.train.get_dataset_shard("train")             │
 │         │                ▲                                       │
 │         │                │                                       │
@@ -96,16 +105,18 @@ The design ethos is **"zero hardcoded model names anywhere"**: every architectur
 
 ### 2.2 Subsystem responsibilities
 
-| Subsystem            | Responsibility                                                                                | Key contract                                                                  |
-| -------------------- | --------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `bhaskera.config`    | Parse YAML → typed dataclasses; defaults; round-trip via `.as_dict()` / `Config.from_dict()`. | Frozen dataclass tree; immutable shape; field names match YAML keys.          |
-| `bhaskera.introspect`| One-shot structural detection of the model: layer classes, expert modules, routers, dtype.    | Returns `ModelProfile`; no model-name checks; pure structural inference.      |
-| `bhaskera.data`      | Build a `ray.data.Dataset` from a registered dataset name; cache tokenization on disk.        | `build_ray_dataset(cfg, world_size)` returns a tokenized, partitioned dataset.|
-| `bhaskera.models`    | Instantiate the HF model, apply Liger Kernel, attach LoRA.                                    | `build_model(cfg, device)` returns `(model, profile)`.                        |
-| `bhaskera.distributed` | Wrap the model for FSDP2 or DDP; save/load DCP checkpoints; per-expert sharding.            | `wrap_model(model, cfg, local_rank, profile)`; `save_checkpoint`, `load_checkpoint`. |
-| `bhaskera.trainer`   | Forward / backward / step loop; grad accumulation; MoE aux loss; throughput; checkpoint cadence. | `train(model, dataset, cfg, profile, rank, local_rank, tracker, world_size)`. |
-| `bhaskera.launcher`  | CLI parsing, Ray cluster init, SLURM-aware GPU counting, `TorchTrainer.fit()`.                | Stdlib `argparse` entrypoints; exit codes preserved.                          |
-| `bhaskera.utils`     | pynvml/psutil telemetry, MFU/throughput tracker, MLflow/W&B/Ray loggers.                      | `BaseLogger.log(metrics, step)`; never raises into the training loop.         |
+| Subsystem              | Responsibility                                                                                | Key contract                                                                  |
+| ---------------------- | --------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `bhaskera.config`      | Parse YAML → typed dataclasses; defaults; round-trip via `.as_dict()` / `Config.from_dict()`. | Frozen dataclass tree; immutable shape; field names match YAML keys.          |
+| `bhaskera.introspect`  | One-shot structural detection of the model: layer classes, expert modules, routers, dtype.    | Returns `ModelProfile`; no model-name checks; pure structural inference.      |
+| `bhaskera.data`        | Build a `ray.data.Dataset` from a registered dataset name; cache tokenization on disk.        | `build_ray_dataset(cfg, world_size)` returns a tokenized, partitioned dataset.|
+| `bhaskera.models`      | Instantiate the HF model, apply Liger Kernel, attach LoRA/QLoRA.                             | `build_model(cfg, device)` returns `(model, profile)`.                        |
+| `bhaskera.distributed` | Wrap the model for FSDP2 or DDP; save/load DCP checkpoints; per-expert sharding.             | `wrap_model(model, cfg, local_rank, profile)`; `save_checkpoint`, `load_checkpoint`. |
+| `bhaskera.trainer`     | Forward / backward / step loop; grad accumulation; MoE aux loss; throughput; checkpoint cadence; in-loop evaluation lifecycle. | `train(model, dataset, cfg, profile, rank, local_rank, tracker, world_size)`. |
+| `bhaskera.launcher`    | CLI parsing, Ray cluster init, SLURM-aware GPU counting, `TorchTrainer.fit()`.                | Stdlib `argparse` entrypoints; exit codes preserved.                          |
+| `bhaskera.utils`       | pynvml/psutil telemetry, MFU/throughput tracker, MLflow/W&B/Ray loggers.                     | `BaseLogger.log(metrics, step)`; never raises into the training loop.         |
+| `bhaskera.evaluation`  | Distributed validation loop + benchmark execution; lazy tokenizer load; `Evaluator` facade.  | `Evaluator.run_validation(val_dataset)`, `Evaluator.run_benchmarks()`.        |
+| `bhaskera.plugins`     | Dynamically loaded metric, benchmark, and optimizer extensions registered via decorators.     | `@register_metric`, `@register_benchmark`, `@register_optimizer`; lazy import on first use. |
 
 ---
 
@@ -113,7 +124,7 @@ The design ethos is **"zero hardcoded model names anywhere"**: every architectur
 
 Bhaskera runs as a Ray cluster. The two relevant process types are:
 
-**Driver (one process).** Started by `bhaskera-train` on the head node. Responsible for: parsing config, initialising Ray, building the tokenized `ray.data.Dataset` (a lazy reference — no I/O until consumed), instantiating `TorchTrainer`, calling `.fit()`. On SLURM the driver lives inside the `srun ray symmetric-run` invocation.
+**Driver (one process).** Started by `bhaskera-train` on the head node. Responsible for: parsing config, loading plugins (`load_plugins(cfg)`), initialising Ray, building the tokenized `ray.data.Dataset` (a lazy reference — no I/O until consumed), instantiating `TorchTrainer`, calling `.fit()`. On SLURM the driver lives inside the `srun ray symmetric-run` invocation.
 
 **Training workers (one process per GPU).** Spawned by Ray Train's `TorchTrainer`. Each runs `bhaskera.launcher.worker.worker_fn`. Each worker has its own `torch.distributed` rank, its own GPU, and its own dataset shard via `ray.train.get_dataset_shard("train")`. Workers communicate via NCCL collectives — Ray itself is *not* on the hot path during a training step.
 
@@ -123,24 +134,26 @@ The handoff from Ray to the training loop is deliberate: Ray handles cluster orc
 
 ```
 1.  Config.from_dict(cfg_dict)          # deserialise from Ray Train's train_loop_config
-2.  Ray Train context → rank, local_rank, world_size
-3.  torch.cuda.set_device(local_rank)
-4.  Seed (base_seed + rank) so each rank shuffles differently but reproducibly
-5.  Get dataset shard for THIS rank (Ray Data handles partitioning)
-6.  build_model(cfg, load_device)
-    ├─ AutoModelForCausalLM.from_pretrained(...)
-    ├─ introspect_model(model)            → ModelProfile
-    ├─ _maybe_apply_liger_kernel(model)   → Triton-fused kernels (no-op if unsupported)
-    └─ apply_lora(model, cfg, profile)    → PEFT, with dtype cast under FSDP
-7.  wrap_model(model, cfg, local_rank, profile)
+2.  load_plugins(cfg)                   # import optimizer plugins declared in cfg.plugins
+3.  Ray Train context → rank, local_rank, world_size
+4.  torch.cuda.set_device(local_rank)
+5.  Seed (base_seed + rank) so each rank shuffles differently but reproducibly
+6.  Get dataset shard for THIS rank (Ray Data handles partitioning)
+7.  build_model(cfg, load_device)
+    ├─ build_quantization_config(cfg)    → BitsAndBytesConfig (QLoRA) or None
+    ├─ AutoModelForCausalLM.from_pretrained(..., quantization_config=...)
+    ├─ introspect_model(model)           → ModelProfile
+    ├─ _maybe_apply_liger_kernel(model)  → Triton-fused kernels (no-op if unsupported)
+    └─ apply_lora(model, cfg, profile)   → PEFT, with dtype cast under FSDP
+8.  wrap_model(model, cfg, local_rank, profile)
     ├─ FSDP path: per-expert fully_shard → per-layer fully_shard → root fully_shard,
     │             then activation checkpointing
     └─ DDP path:  activation checkpointing (pre-wrap) → DDP(...)
-8.  build_logger(cfg, rank, world_size)  → MultiLogger (per-rank policy)
-9.  trainer.train(model, dataset, cfg, profile, rank, local_rank, tracker, world_size)
+9.  build_logger(cfg, rank, world_size)  → MultiLogger (per-rank policy)
+10. trainer.train(model, dataset, cfg, profile, rank, local_rank, tracker, world_size)
 ```
 
-Step 8 is rank-aware: W&B and MLflow run on rank 0 only by default (this is configurable via `logging.mlflow_log_all_ranks`). The Ray logger runs on every rank because per-GPU metrics are uniquely tagged.
+Step 2 (`load_plugins`) fires the `@register_optimizer` side effects for any plugins listed in `cfg.plugins.optimizers` before the optimizer is built in step 10.
 
 ### 3.2 Per-step control flow (inside `_run_epoch`)
 
@@ -168,6 +181,17 @@ for each optimizer step:
     optimizer.zero_grad(set_to_none=True)
 
     log(window_loss, lr, grad_norm, mfu, throughput, expert_utilization)
+
+    # ── In-loop evaluation ───────────────────────────────────────────
+    if evaluator.should_run_validation(step):
+        with eval_lifecycle.pause_for_evaluation():
+            metrics = evaluator.run_validation(val_dataset)
+            logger.log(metrics, step)
+
+    if evaluator.should_run_benchmark(step):
+        with eval_lifecycle.pause_for_evaluation():
+            metrics = evaluator.run_benchmarks()
+            logger.log(metrics, step)
 ```
 
 Two non-obvious properties of this loop:
@@ -182,7 +206,31 @@ Two non-obvious properties of this loop:
 
 ### 4.1 `config` — single source of truth
 
-The config system is a tree of `@dataclass` types (`Config` → `ModelConfig`, `DataConfig`, `LoraConfig`, `MoEConfig`, `TrainingConfig` → `DistributedConfig` → `{FSDPConfig, DDPConfig}`, `CheckpointConfig`, `LoggingConfig`, `InferenceConfig` → `{TurboQuantConfig, SpeculativeConfig}`, `MonitoringConfig` → `MetricsConfig`).
+The config system is a tree of `@dataclass` types:
+
+```
+Config
+├── PluginsConfig          (plugins.optimizers: list of import paths)
+├── ModelConfig            (name, dtype, attn_impl, trust_remote_code, use_liger_kernel, quantization)
+├── DataConfig             (name, seq_len, is_cpt, tokenized_path, format, path, ...)
+├── LoraConfig
+├── MoEConfig
+├── OptimizerConfig        (backend: "default"|"torch"|"plugin", class_name, name, kwargs)
+├── TrainingConfig         (batch_size, grad_accum, lr, ..., optimizer: OptimizerConfig)
+│   └── DistributedConfig
+│       ├── FSDPConfig
+│       └── DDPConfig
+├── CheckpointConfig
+├── LoggingConfig
+├── EvaluationConfig       (enabled, offload_optimizer, validation, benchmarks)
+│   ├── ValidationConfig   (dataset, every_n_steps, every_n_epochs, metrics: list[str])
+│   └── BenchmarksConfig   (every_n_steps, every_n_epochs, tasks: list[str])
+├── InferenceConfig
+│   ├── TurboQuantConfig
+│   └── SpeculativeConfig
+└── MonitoringConfig
+    └── MetricsConfig
+```
 
 **Design.** Every field has an explicit default; YAML is parsed via `yaml.safe_load` and the resulting dict is fed through `_dict_to_config`, which calls each leaf constructor explicitly rather than `**unpack`. This is intentional: an unknown YAML key (typo) is silently ignored at the leaf level, but the entire shape of the config tree is invariant — downstream code reading `cfg.training.distributed.fsdp.sharding_strategy` cannot ever see `AttributeError`. The trade-off is verbosity in `_dict_to_config`; the win is that every consumer codepath is statically typed and discoverable.
 
@@ -227,14 +275,18 @@ The contract for `ModelProfile` is consumed by `distributed.fsdp` (for per-exper
 
 ### 4.3 `data` — Ray Data pipeline and persistent tokenization
 
-The data layer has three pieces that compose: a **dataset registry**, a **format registry**, and a **tokenizer with a persistent on-disk cache**.
+The data layer has three pieces that compose: a **dataset registry**, a **format registry**, and a **tokenizer with a persistent on-disk cache**. It also supports a **Continual Pre-Training (CPT)** mode for packing raw text corpora.
 
 **Dataset registry (`data.registry`).** Two parallel registries:
 - `REGISTRY` — `name -> (cfg, world_size) -> tokenized ray.data.Dataset`
 - `RAW_REGISTRY` — `name -> (cfg, split=None) -> raw ray.data.Dataset`
 - `TEXT_COL` — `name -> column name to tokenize`
 
-`@register("ultrachat")` registers the tokenized builder; `@register_raw("ultrachat", text_col="prompt")` registers the raw builder used by `bhaskera-tokenize`. The split is the why: the tokenize CLI needs the *raw* dataset because it has not yet been tokenized, whereas training needs the *tokenized* one (either live or from cache). Keeping them separate lets new datasets opt into either or both modes.
+`@register("ultrachat")` registers the tokenized builder; `@register_raw("ultrachat", text_col="prompt")` registers the raw builder used by `bhaskera-tokenize`. Keeping them separate lets new datasets opt into either or both modes.
+
+Built-in datasets: `ultrachat`, `openassistant`, `redpajama`, `local_chat` (generic JSONL/JSON/Parquet loader), `local_cpt` (CPT continuous packing).
+
+**Continual Pre-Training (`data/datasets/local_cpt.py`).** When `data.is_cpt: true` is set, the tokenizer pipeline reads raw JSONL text documents and **continuously packs** tokens into fixed-length chunks of `seq_len` tokens, discarding no context across document boundaries. This matches the pre-training objective and eliminates padding waste. The CPT path is entirely self-contained: the rest of the data pipeline (cache key, parquet output, Ray partitioning) is unchanged.
 
 **Format registry (`data.formats`).** A renderer is a function `(row, tokenizer, options) -> str`. Built-ins:
 - `chatml` — `messages: [{role, content}, ...]` → `tokenizer.apply_chat_template(...)` with manual fallback for tokenizers that have no template.
@@ -257,7 +309,7 @@ The cache directory contains parquet shards and a `metadata.json`:
   "num_rows": 207866,
   "schema": ["input_ids", "attention_mask", "labels"],
   "created_at": "2025-11-12T03:18:42.193Z",
-  "bhaskera_version": "2.3.0",
+  "bhaskera_version": "2.2.0",
   "format_name": "chatml",
   "format_options": {}
 }
@@ -269,22 +321,30 @@ The tokenizer itself is a stateful Ray actor (`TokenizerActor`) loaded once per 
 
 `_compute_num_partitions` rounds the partition count up to a multiple of `world_size` (minimum 16) so every rank sees an equal number of shards — preventing the empty-shard hang that would otherwise occur when `num_partitions < world_size`.
 
-### 4.4 `models` — HF loader, Liger Kernel, LoRA
+### 4.4 `models` — HF loader, Liger Kernel, LoRA, QLoRA
 
-**Loader (`models.loader.build_model`).** Three responsibilities:
+**Loader (`models.loader.build_model`).** Four responsibilities:
 
-1. **Load.** `AutoModelForCausalLM.from_pretrained(name, torch_dtype=..., attn_implementation=...)` with `low_cpu_mem_usage=True` and `trust_remote_code=cfg.model.trust_remote_code`. For FSDP the model is loaded onto CPU (FSDP handles GPU migration during sharding); for DDP it is moved to the target GPU immediately.
+1. **Quantization config.** `build_quantization_config(cfg)` returns a `BitsAndBytesConfig` for QLoRA mode, or `None` for the default path. When `model.quantization: qlora` and `strategy: fsdp`, a `ValueError` is raised immediately with a clear message — FSDP2 cannot shard `Params4bit` tensors.
 
-2. **Introspect.** Calls `introspect_model` and stores the resulting `ModelProfile`.
+2. **Load.** `AutoModelForCausalLM.from_pretrained(name, torch_dtype=..., attn_implementation=..., quantization_config=...)` with `low_cpu_mem_usage=True` and `trust_remote_code=cfg.model.trust_remote_code`. For FSDP the model is loaded onto CPU (FSDP handles GPU migration during sharding); for DDP it is moved to the target GPU immediately.
 
-3. **Liger Kernel.** `_maybe_apply_liger_kernel` calls `liger_kernel.transformers._apply_liger_kernel_to_instance(model=model)`, which dispatches on `model.config.model_type` and replaces RMSNorm / RoPE / SwiGLU / CrossEntropy with Triton-fused versions for supported architectures. Any failure (package missing, unsupported architecture, runtime error) is downgraded to a warning. **Order matters.** Liger is applied *before* LoRA so PEFT wraps the already-fused modules (LoRA adapters attach to Linear children, which Liger does not touch), and *before* FSDP wrap so sharding sees the final module classes.
+3. **Introspect.** Calls `introspect_model` and stores the resulting `ModelProfile`.
+
+4. **Liger Kernel.** `_maybe_apply_liger_kernel` calls `liger_kernel.transformers._apply_liger_kernel_to_instance(model=model)`, which dispatches on `model.config.model_type` and replaces RMSNorm / RoPE / SwiGLU / CrossEntropy with Triton-fused versions for supported architectures. Any failure (package missing, unsupported architecture, runtime error) is downgraded to a warning. **Order matters.** Liger is applied *before* LoRA so PEFT wraps the already-fused modules (LoRA adapters attach to Linear children, which Liger does not touch), and *before* FSDP wrap so sharding sees the final module classes.
+
+**Quantization (`models.quantization`).** The `build_quantization_config(cfg)` helper:
+- Returns `None` when `model.quantization` is `"none"` (the default) — the existing load path is bit-for-bit identical.
+- Returns a `BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)` when `model.quantization: qlora`.
+- Raises `ValueError` when `model.quantization: qlora` and `strategy: fsdp`.
+- Imports are deferred so environments without `bitsandbytes` installed are unaffected when quantization is disabled.
 
 **LoRA (`models.lora.apply_lora`).** The whole file is annotated because of a subtle FSDP2-vs-DDP dtype interaction:
 
 - PEFT initialises LoRA A/B in float32 for numerical stability.
 - FSDP2's `_init_mp_dtypes()` requires every parameter inside a shard group to share the same **original** dtype. If the base model is bf16 and LoRA is fp32, FSDP raises `AssertionError: FSDP expects uniform original parameter dtype`.
-- **FSDP path:** cast LoRA params to base dtype after `get_peft_model`. AdamW moments are then stored in bf16, which is slightly noisier; this is mitigated by `reduce_dtype=float32` in the `MixedPrecisionPolicy`. For users who need true fp32 master weights, load the base model in fp32 (`model.dtype: float32`) and let `MixedPrecisionPolicy(param_dtype=bf16)` cast at forward time — costs ~2× base param memory but everything is uniform fp32 at shard-init.
-- **DDP path:** keep PEFT's fp32 default. Casting under DDP is actively harmful — AdamW state is allocated to match param dtype, and at β₂=0.95 with bf16 params the second-moment update quantises most LoRA gradients to zero at typical LRs (~2e-4), starving the optimiser. DDP's autocast already handles the bf16 forward.
+- **FSDP path:** cast LoRA params to base dtype after `get_peft_model`. AdamW moments are then stored in bf16, which is slightly noisier; this is mitigated by `reduce_dtype=float32` in the `MixedPrecisionPolicy`.
+- **DDP / QLoRA path:** keep PEFT's fp32 default. Casting under DDP is actively harmful — AdamW state is allocated to match param dtype, and at β₂=0.95 with bf16 params the second-moment update quantises most LoRA gradients to zero at typical LRs (~2e-4), starving the optimiser. DDP's autocast already handles the bf16 forward.
 
 Router freezing for MoE LoRA is gated by `cfg.lora.freeze_router=True`. It uses `profile.router_module_names` (from structural detection) as the primary signal and falls back to keyword matching only if structural detection produced an empty list.
 
@@ -336,21 +396,32 @@ The trainer has **no Ray dependency, no SLURM logic, no distributed init.** It a
 Inside, `_run_epoch` is the workhorse described in §3.2. A few subtleties worth surfacing:
 
 - **Loss EMA & spike ratio.** A running EMA of the loss (`loss_ema_alpha=0.05`) and the ratio `window_loss / loss_ema` are logged every step. The spike ratio is a cheap leading indicator of divergence — values consistently above 2× usually mean LR is too high or aux loss is fighting the main loss.
-- **Non-finite grad protection.** If `clip_grad_norm_` returns NaN/Inf, the optimizer step is skipped, `optimizer.zero_grad(set_to_none=True)` is called, and the step counter does **not** advance. After `cfg.training.max_grad_skip_steps` consecutive skips the run aborts (in practice this almost always means a corrupted batch or a routing collapse and warrants manual intervention).
-- **Best-by-loss checkpoint retention.** `save_and_prune` keeps `cfg.checkpoint.keep_last_n` checkpoints sorted by ascending `avg_loss` — not by step. The trade-off is that early-training checkpoints (which often have low loss for the wrong reason) can crowd out later, better-generalised ones; tune `keep_last_n` accordingly.
+- **Non-finite grad protection.** If `clip_grad_norm_` returns NaN/Inf, the optimizer step is skipped, `optimizer.zero_grad(set_to_none=True)` is called, and the step counter does **not** advance. After `cfg.training.max_grad_skip_steps` consecutive skips the run aborts.
+- **Best-by-loss checkpoint retention.** `save_and_prune` keeps `cfg.checkpoint.keep_last_n` checkpoints sorted by ascending `avg_loss` — not by step.
+
+**Pluggable optimizer (`trainer.optim` + `trainer.optimizer_registry`).** `build_optimizer(model, cfg)` dispatches on `cfg.training.optimizer.backend`:
+
+- `"default"` — AdamW (fused when available) with the standard 1-D / 2-D weight decay split. This is the backward-compatible path when no `optimizer` block is present.
+- `"torch"` — any class in `torch.optim` by `class_name`, e.g. `class_name: "Adadelta"`. kwargs are forwarded from `optimizer.kwargs`.
+- `"plugin"` — looks up `name` in `OPTIMIZER_REGISTRY` (populated by `@register_optimizer`), calls the registered builder function `(model, train_cfg) -> Optimizer`.
+
+`optimizer_registry.py` owns `OPTIMIZER_REGISTRY: Dict[str, Callable]` and the `@register_optimizer(name)` decorator. Plugins are loaded before optimizer construction by `load_plugins(cfg)` in `worker_fn`.
+
+**Eval lifecycle (`trainer.eval_lifecycle`).** `EvaluationLifecycle` is a context manager used inside `_run_epoch`:
+
+- **Teardown phase:** destroys the active dataloader and prefetch buffers, offloads optimizer CUDA state to CPU (`_offload_optimizer_to_cpu`), and records the dataset cursor position.
+- **Evaluation phase:** model stays in its distributed wrapper; caller runs validation / benchmarks inside the `with` block.
+- **Restore phase:** restores the optimizer to GPU (`_restore_optimizer_to_gpu`), rebuilds the dataloader from the cursor position (Ray Data `dataset.skip()` — a metadata-only operation), and triggers `gc.collect()` + `torch.cuda.empty_cache()`.
+
+The `_bhaskera_offloaded` flag on the optimizer prevents double-offload if `run_distributed_validation` is called from inside a lifecycle block that already offloaded the optimizer.
 
 **MoE auxiliary loss (`trainer.moe`).** Three layers:
 
-1. `extract_aux_loss(out, profile)` tries well-known attribute names (`aux_loss`, `router_aux_loss`, `moe_loss`, `load_balancing_loss`) first — zero overhead for models that compute the loss themselves. Falls back to computing it from `out.router_logits`.
+1. `extract_aux_loss(out, profile)` tries well-known attribute names (`aux_loss`, `router_aux_loss`, `moe_loss`, `load_balancing_loss`) first. Falls back to computing it from `out.router_logits`.
 2. `_normalize_router_logits` unwraps `tuple/list of Tensor` or `tuple/list of (logits, indices)` shapes.
-3. `_infer_logit_kind` classifies by last-dim:
-   - `last_dim == 1` → `_KIND_GATE` (scalar gate, skip)
-   - `last_dim == num_experts` or `num_experts + num_shared` → `_KIND_FULL` (softmax over all)
-   - `last_dim == experts_per_token` → `_KIND_TOPK` (Param2-style — only the selected k)
+3. `_infer_logit_kind` classifies by last-dim: `_KIND_GATE` (scalar), `_KIND_FULL` (softmax over all experts), `_KIND_TOPK` (Param2-style — only the selected k).
 
-The Switch-Transformer-style loss `N * sum_i(f_i * P_i)` is computed for each layer and averaged. For `_KIND_TOPK` shapes, `f_i = 1/k` uniformly because the router only emits scores for already-selected experts — the gradient signal still flows through the probability term `P_i`.
-
-`compute_expert_utilization` produces `expert/load_max`, `expert/load_min`, `expert/load_std`, `expert/imbalance_ratio` for the logger. These metrics are the canonical diagnostic for MoE health — a healthy run shows `load_max / load_min ≤ ~3×`; values above 10× indicate routing collapse.
+`compute_expert_utilization` produces `expert/load_max`, `expert/load_min`, `expert/load_std`, `expert/imbalance_ratio` for the logger. A healthy run shows `load_max / load_min ≤ ~3×`; values above 10× indicate routing collapse.
 
 ### 4.7 `launcher` — CLI entry points
 
@@ -367,15 +438,16 @@ Each entry point in `bhaskera.launcher.*` is wired to a console script in `pypro
 **`launcher.train`** is the most architecturally important. It does:
 
 1. Parse args, load config.
-2. `setup_monitoring(cfg)` → `MonitoringContext` (Ray Dashboard kwargs + MLflow UI URL discovery).
-3. `_init_ray(monitoring)` — connects to `RAY_ADDRESS` if set (SLURM path), else starts a local Ray cluster.
-4. `_count_gpus()` — returns `SLURM_NNODES × SLURM_GPUS_PER_NODE` if both are set (multi-node SLURM), else `torch.cuda.device_count()`. Without this, on a SLURM login node `torch.cuda.device_count()` returns 0 or 1 and the cluster is mis-sized.
-5. `build_ray_dataset(cfg, world_size=num_workers)` — builds the lazy `ray.data.Dataset` reference.
-6. `TorchTrainer(train_loop_per_worker=worker_fn, train_loop_config=cfg.as_dict(), datasets={"train": ray_dataset}, ...).fit()`.
+2. `load_plugins(cfg)` — import optimizer plugins (driver-side; workers also call this in `worker_fn`).
+3. `setup_monitoring(cfg)` → `MonitoringContext` (Ray Dashboard kwargs + MLflow UI URL discovery).
+4. `_init_ray(monitoring)` — connects to `RAY_ADDRESS` if set (SLURM path), else starts a local Ray cluster.
+5. `_count_gpus()` — returns `SLURM_NNODES × SLURM_GPUS_PER_NODE` if both are set (multi-node SLURM), else `torch.cuda.device_count()`.
+6. `build_ray_dataset(cfg, world_size=num_workers)` — builds the lazy `ray.data.Dataset` reference.
+7. `TorchTrainer(train_loop_per_worker=worker_fn, train_loop_config=cfg.as_dict(), datasets={"train": ray_dataset}, ...).fit()`.
 
-**`launcher.tokenize`** runs entirely on CPUs — no GPU is required. It prefetches the tokenizer in the driver process before `ray.init` (so all workers find it in the HF cache), then for each requested split builds the raw dataset and pipes it through `persist_tokenized`. It prints a copy-pasteable YAML snippet at the end with the resulting `tokenized_path` / `val_tokenized_path` keys.
+**`launcher.tokenize`** runs entirely on CPUs — no GPU is required. It prefetches the tokenizer in the driver process before `ray.init`, then for each requested split builds the raw dataset and pipes it through `persist_tokenized`. It prints a copy-pasteable YAML snippet at the end with the resulting `tokenized_path` / `val_tokenized_path` keys.
 
-**`launcher.dashboard`** manages the MLflow UI as a detached subprocess on the login node. Persisted config at `~/.bhaskera/mlflow-ui.json`; PID at `~/.bhaskera/mlflow-ui.pid`; log at `~/.bhaskera/mlflow-ui.log`. Subcommands: `start | stop | status | tunnel`. The `tunnel` subcommand prints the exact `ssh -L 5000:localhost:5000 user@login-node` command for the user's laptop — eliminating the most common "how do I see the dashboard" question.
+**`launcher.dashboard`** manages the MLflow UI as a detached subprocess on the login node. Persisted config at `~/.bhaskera/mlflow-ui.json`; PID at `~/.bhaskera/mlflow-ui.pid`; log at `~/.bhaskera/mlflow-ui.log`. Subcommands: `start | stop | status | tunnel`. The `tunnel` subcommand prints the exact `ssh -L 5000:localhost:5000 user@login-node` command for the user's laptop.
 
 ### 4.8 `utils` — telemetry, throughput, loggers
 
@@ -393,19 +465,103 @@ MFU% = 100 × achieved / peak_flops_per_gpu
 
 `peak_flops_per_gpu` is configured via `monitoring.metrics.peak_tflops_per_gpu` (default 312 = A100 bf16; set 165 for RTX 4090, 121 for L4, etc.). The first `warmup_steps` step times are dropped from the moving average because they include compile / cache warmup.
 
-For LoRA fine-tuning the dominant FLOP is still through the frozen base weights (the LoRA delta multiplies into the base path during forward+backward), so `params_for_flops` is the **total** parameter count, not the trainable count. The training loop passes `total_params` by default.
+For LoRA fine-tuning the dominant FLOP is still through the frozen base weights, so `params_for_flops` is the **total** parameter count, not the trainable count.
 
-**Loggers (`utils.loggers`).**
-
-`build_logger(cfg, rank, world_size) -> Optional[BaseLogger]` returns a `MultiLogger` that fans out to each enabled backend:
+**Loggers (`utils.loggers`).** `build_logger(cfg, rank, world_size) -> Optional[BaseLogger]` returns a `MultiLogger` that fans out to each enabled backend:
 
 - **Ray** (`RayMetricsLogger`) — every rank, pushes to Ray Dashboard's Prometheus.
-- **MLflow** — rank 0 by default (set `mlflow_log_all_ranks: true` for per-rank breakdowns). Push-based, file-store at `~/mlflow-runs` (or `MLFLOW_TRACKING_URI`). Uses a bounded queue + daemon thread to absorb store jitter; a slow store cannot stall the train step. Metrics flush on `.finish()`.
+- **MLflow** — rank 0 by default (set `mlflow_log_all_ranks: true` for per-rank breakdowns). Push-based, file-store at `~/mlflow-runs`. Uses a bounded queue + daemon thread to absorb store jitter.
 - **W&B** — rank 0 only when `wandb` is in the tracker list.
 
-If `cfg.monitoring.dashboard` is true (default), `"ray"` is automatically added to the tracker set so custom training metrics flow to the dashboard's Prometheus without explicit config.
+`MultiLogger.log` swallows per-child exceptions and continues — one flaky tracker never breaks training.
 
-`MultiLogger.log` swallows per-child exceptions and continues — one flaky tracker never breaks training. `BaseLogger` is intentionally minimal: just `log(metrics, step)` and `finish()`.
+### 4.9 `evaluation` — distributed validation and benchmarks
+
+The evaluation subsystem provides in-training model evaluation without model reload or distributed teardown. It is opt-in via `evaluation.enabled: true` in YAML.
+
+**`evaluation.evaluator.Evaluator`** is the facade consumed by the training loop. It is constructed once in `worker_fn` and passed into `trainer.train`. Key methods:
+
+- `should_run_validation(step)` — returns True when `step % cfg.evaluation.validation.every_n_steps == 0`.
+- `should_run_benchmark(step)` — returns True when `step % cfg.evaluation.benchmarks.every_n_steps == 0`.
+- `run_validation(val_dataset, optimizer=None)` — delegates to `run_distributed_validation`. Accepts an optional optimizer reference for GPU memory reclamation.
+- `run_benchmarks(tokenizer=None)` — delegates to `run_benchmarks`. The tokenizer is lazy-loaded on first use (`AutoTokenizer.from_pretrained` is deferred until the first benchmark call).
+
+**`evaluation.validation.run_distributed_validation`** is the core validation loop:
+
+- Optimizer state is optionally offloaded to CPU before the eval pass and restored after, freeing GPU memory. Self-sufficient: it applies its own offload if no enclosing `EvaluationLifecycle` already did (`_bhaskera_offloaded` flag prevents double-offload).
+- Loss is computed in **sequence chunks** (`LOSS_CHUNK_SEQ_LEN = 512`) to bound peak memory regardless of vocab size or whether Liger's fused CE kernel is active in eval mode.
+- Distributed aggregation: per-rank losses are `all_reduce`'d; metric results are computed on rank 0 and `broadcast_object_list`'d to all ranks.
+- Memory is reclaimed every `MEMORY_CLEANUP_EVERY_N_BATCHES` batches via `gc.collect()` + `cuda.empty_cache()`.
+
+**`evaluation.benchmark_runner.run_benchmarks`** runs tasks registered in `BENCHMARK_REGISTRY`. Each benchmark class implements `run(model, tokenizer, cfg) -> dict[str, float]`. Results are broadcast from rank 0 to all ranks after the run.
+
+**`evaluation.registry`** holds `METRIC_REGISTRY` and `BENCHMARK_REGISTRY`. Both support lazy import: if a name is not already in the registry, `get_metric("loss")` imports `bhaskera.plugins.metrics.loss` and the `@register_metric` side effect fires. Similarly for benchmarks. This means plugins do not need to be pre-imported — the registry imports them on demand.
+
+### 4.10 `plugins` — optimizer, metric, and benchmark extensions
+
+The plugin system is the extension point for user-supplied components. All plugin types follow the same pattern: a decorator registers a class or builder function by name; the framework looks up the name in the registry at runtime; dynamic import handles first-use loading.
+
+**Optimizer plugins (`plugins/optimizers/`, `trainer/optimizer_registry.py`).**
+
+```python
+from bhaskera.trainer.optimizer_registry import register_optimizer
+
+@register_optimizer("lion")
+def build_lion(model, train_cfg):
+    from bhaskera.trainer.optim import _get_default_param_groups
+    opt_cfg = train_cfg.optimizer
+    param_groups = _get_default_param_groups(model, opt_cfg.kwargs.get("weight_decay", 0.0))
+    return Lion(param_groups, lr=opt_cfg.kwargs.get("lr", train_cfg.lr), ...)
+```
+
+YAML declaration:
+```yaml
+plugins:
+  optimizers:
+    - "bhaskera.plugins.optimizers.lion"
+
+training:
+  optimizer:
+    backend: "plugin"
+    name: "lion"
+    kwargs:
+      lr: 5.0e-6
+      betas: [0.9, 0.99]
+```
+
+Built-in: `lion` (EvoLved Sign Momentum / Lion optimizer).
+
+**Metric plugins (`plugins/metrics/`, `evaluation/registry.py`).**
+
+```python
+from bhaskera.evaluation.registry import register_metric
+
+@register_metric("my_metric")
+class MyMetric:
+    def compute(self, predictions, labels, losses) -> dict:
+        return {"validation/my_metric": ...}
+```
+
+Enabled in YAML: `evaluation.validation.metrics: [loss, perplexity, token_accuracy, my_metric]`
+
+Built-ins: `loss`, `perplexity`, `token_accuracy`.
+
+**Benchmark plugins (`plugins/benchmarks/`, `evaluation/registry.py`).**
+
+```python
+from bhaskera.evaluation.registry import register_benchmark
+
+@register_benchmark("my_bench")
+class MyBenchmark:
+    def run(self, model, tokenizer, cfg) -> dict:
+        return {"benchmark/my_bench_accuracy": ...}
+```
+
+Enabled in YAML: `evaluation.benchmarks.tasks: [hellaswag, arc_easy, arc_challenge, my_bench]`
+
+Built-ins: `hellaswag` (full batched, distributed all-gather), `arc_easy` (full batched, distributed all-gather), `arc_challenge` (placeholder).
+
+**`plugins/loader.py`.** `load_plugins(cfg)` iterates `cfg.plugins.optimizers`, imports each module path, and surfaces failures as `ImportError`. Called in both the driver (before `TorchTrainer.fit()`) and each worker (at the start of `worker_fn`) to ensure the registry is populated in both processes.
 
 ---
 
@@ -437,7 +593,7 @@ A naive checkpoint save can be interrupted mid-write (SLURM time limit, OOM, NCC
 
 ### 5.6 Single source of truth for mixed precision (under FSDP)
 
-FSDP2's `MixedPrecisionPolicy` controls (a) the cast applied to params on forward, (b) the dtype of gradient reductions, (c) the dtype of buffers (e.g. norm running mean/var). Wrapping the forward in `torch.autocast` on top of this produces *double casting* — autocast casts the activation back up to fp32 for some ops, then the policy casts it back to bf16, and gradient reductions become inconsistent. The training loop therefore enables autocast **only** when `strategy == "ddp"`. This is enforced in `_run_epoch`:
+FSDP2's `MixedPrecisionPolicy` controls (a) the cast applied to params on forward, (b) the dtype of gradient reductions, (c) the dtype of buffers (e.g. norm running mean/var). Wrapping the forward in `torch.autocast` on top of this produces *double casting*. The training loop therefore enables autocast **only** when `strategy == "ddp"`:
 
 ```python
 use_autocast = (strategy == "ddp" and device.type == "cuda")
@@ -450,12 +606,15 @@ autocast_ctx = (
 
 ### 5.7 NCCL configuration at job start, not in Python
 
-`scripts/submit.sh` handles NCCL setup before Python is invoked, because:
-- Setting `NCCL_*` env vars *inside* the Python process is too late — they're read on `init_process_group`, and Ray Train initialises the process group before the user's `train_loop_per_worker` runs.
-- IB / RoCE detection is a shell-level check (`/sys/class/infiniband/*/ports/*/state`, `ibstat`) that is awkward to do from Python.
-- `NCCL_TIMEOUT`, `TORCH_NCCL_BLOCKING_WAIT`, `TORCH_DISTRIBUTED_TIMEOUT`, and `NCCL_ASYNC_ERROR_HANDLING` must be set before the first import of torch on a fresh process.
+`scripts/submit.sh` handles NCCL setup before Python is invoked, because `NCCL_*` env vars are read on `init_process_group`, which Ray Train initialises before `train_loop_per_worker` runs. IB / RoCE detection is a shell-level check (`/sys/class/infiniband/*/ports/*/state`, `ibstat`). `NCCL_TIMEOUT`, `TORCH_NCCL_BLOCKING_WAIT`, `TORCH_DISTRIBUTED_TIMEOUT`, and `NCCL_ASYNC_ERROR_HANDLING` must be set before the first import of torch on a fresh process.
 
-The result is that NCCL configuration is reproducible per cluster, lives in version control, and is shared across all training jobs without any per-job tweaking.
+### 5.8 QLoRA is DDP-only
+
+BitsAndBytes loads base weights as `Params4bit` tensors. FSDP2's `fully_shard` expects standard PyTorch `nn.Parameter` objects and produces undefined behaviour (or crashes) when it attempts to shard `Params4bit`. The `build_quantization_config` function enforces this constraint early (before any model work begins) with a `ValueError` rather than letting FSDP fail internally. Each DDP rank holds a full 4-bit copy of the model; at 17B in NF4 this is ~8.5 GB/GPU, well within 24 GB headroom.
+
+### 5.9 Evaluation memory reclamation via optimizer offload
+
+Running a validation forward on the same GPU that holds training state can OOM when: optimizer second moments (Adam m2) are stored in fp32 (~2× model size), lm_head logits are large-vocab, and sequence length is long. `EvaluationLifecycle` and `run_distributed_validation` both implement optimizer offload-restore cycles using `_offload_optimizer_to_cpu` / `_restore_optimizer_to_gpu`. The `_bhaskera_offloaded` flag on the optimizer ensures the offload only happens once even when both call sites are active. Additionally, validation loss is chunked over sequence length (`LOSS_CHUNK_SEQ_LEN = 512`) to bound logit tensor size independent of vocab.
 
 ---
 
@@ -474,6 +633,7 @@ The full lifecycle of one token, from raw JSONL on disk to an entry in MLflow:
                                                   TokenizerActor (lazy)
                                                   ┌───────────────────┐
                                                   │ 1. format renderer│  (chatml | alpaca | sharegpt)
+                                                  │    OR CPT packing │  (is_cpt=True: continuous pack)
                                                   │ 2. HF tokenize    │  (pad to seq_len, truncate)
                                                   │ 3. labels mask    │  (pad positions → -100)
                                                   │ 4. drop empty rows│
@@ -494,6 +654,9 @@ The full lifecycle of one token, from raw JSONL on disk to an entry in MLflow:
    YAML config ──► load_config ──► Config dataclass tree
                                           │
                                           ▼
+                          load_plugins(cfg)  (optimizer plugins)
+                                          │
+                                          ▼
                           driver: ray.init, setup_monitoring
                                           │
                                           ▼
@@ -502,46 +665,48 @@ The full lifecycle of one token, from raw JSONL on disk to an entry in MLflow:
                               (lazy parquet read + repartition)
                                           │
                                           ▼
-                  TorchTrainer(train_loop_per_worker=worker_fn,
-                               datasets={"train": ray_dataset}, ...).fit()
+                  TorchTrainer(train_loop_per_worker=worker_fn, ...).fit()
                                           │
                               ┌───────────┴───────────┐
                               ▼                       ▼
                        worker (rank 0)         worker (rank N-1)
-                              │                       │
+                              │
    ray.train.get_dataset_shard("train")  ◄── auto-partitioned by Ray Data
-                              │                       │
-                              ▼                       ▼
-                       build_model ──► introspect ──► apply_lora
-                              │                       │
-                              ▼                       ▼
+                              │
+                              ▼
+             build_quantization_config → build_model → introspect → apply_lora
+                              │
+                              ▼
                        wrap_model (FSDP2 per-expert / per-layer / root)
-                              │                       │
-                              ▼                       ▼
+                              │
+                              ▼
                   ┌─────────────────────────────────────────────┐
                   │       training loop (every micro-step)      │
                   │                                             │
-                  │  batch from shard ──► forward (autocast off │
-                  │     under FSDP, on under DDP)               │
+                  │  batch ──► forward (FSDP: no autocast,      │
+                  │             DDP: autocast)                  │
                   │       ──► main_loss + aux_weight*aux_loss   │
                   │       ──► backward (sync off on micro 0..k-1│
-                  │                     on on micro k)          │
+                  │                     sync on micro k)        │
                   │  every k micro-steps:                       │
                   │       ──► clip_grad_norm_                   │
                   │       ──► optimizer.step + scheduler.step   │
                   │       ──► log metrics                       │
+                  │                                             │
+                  │  [periodic] EvaluationLifecycle window:     │
+                  │       ──► offload optimizer to CPU          │
+                  │       ──► run_distributed_validation /      │
+                  │           run_benchmarks                    │
+                  │       ──► restore optimizer to GPU          │
                   └─────────────────────────────────────────────┘
-                              │                       │
-                              ▼                       ▼
+                              │
+                              ▼
                   MultiLogger (rank-aware fan-out)
                               │
               ┌───────────────┼───────────────┐
               ▼               ▼               ▼
           MLflow file     W&B (opt)     Ray Dashboard
           store on $HOME                Prometheus
-              │
-              ▼
-          mlflow ui (login node) → ssh -L tunnel → laptop browser
 
 ┌─────────────────────────────────────────────────────────────────┐
 │  PHASE 3 — Checkpointing (every save_interval epochs)           │
@@ -592,12 +757,11 @@ def build(cfg, world_size: int = 1) -> ray.data.Dataset:
     return tokenize_dataset(_build_raw(cfg), cfg, "prompt", world_size=world_size)
 ```
 
-Then add an import to `src/bhaskera/data/datasets/__init__.py` so the `@register` decorator fires at import time. Use it in YAML with `data.name: my_dataset`.
+Then add an import to `src/bhaskera/data/datasets/__init__.py`. Use it in YAML with `data.name: my_dataset`.
 
 ### 7.2 Add a new chat-data format
 
 ```python
-# anywhere — e.g. in a user file imported before training starts
 from bhaskera.data.formats import register_format
 
 @register_format("my_format")
@@ -609,9 +773,7 @@ Then `data.format: my_format` in YAML. `format_options` is hashed into the token
 
 ### 7.3 Add a new model architecture
 
-Usually you do **not** need to do anything — `introspect_model` is purely structural. If the architecture uses an unusual layer container path (not `model.layers`, not `transformer.h`, not `gpt_neox.layers`, not `model.decoder.layers`), add it to `_LAYER_CONTAINER_ATTRS` in `introspect.py`. If MoE experts live under a leaf name other than `experts | expert | routed_experts | moe_experts`, add it to `_EXPERT_LEAF_NAMES`.
-
-If the model emits aux loss under a non-standard attribute name, add it to the tuple in `extract_aux_loss`. If the router logits have a novel shape, extend `_infer_logit_kind`.
+Usually you do **not** need to do anything — `introspect_model` is purely structural. If the architecture uses an unusual layer container path, add it to `_LAYER_CONTAINER_ATTRS` in `introspect.py`. If MoE experts live under a leaf name other than `experts | expert | routed_experts | moe_experts`, add it to `_EXPERT_LEAF_NAMES`. If the model emits aux loss under a non-standard attribute name, add it to the tuple in `extract_aux_loss`.
 
 For a model that is genuinely not loadable via `AutoModelForCausalLM`, register a custom loader:
 
@@ -632,19 +794,70 @@ Subclass `BaseLogger`:
 from bhaskera.utils.loggers.base import BaseLogger
 
 class MyLogger(BaseLogger):
-    def __init__(self, cfg, *, rank=0, world_size=1):
-        ...
-
-    def log(self, metrics: dict, step: int) -> None:
-        ...  # must not raise
-
-    def finish(self) -> None:
-        ...
+    def __init__(self, cfg, *, rank=0, world_size=1): ...
+    def log(self, metrics: dict, step: int) -> None: ...  # must not raise
+    def finish(self) -> None: ...
 ```
 
 Add it to the `build_logger` dispatch in `utils/loggers/__init__.py` and to the `_VALID` set.
 
-### 7.5 Add a new distributed strategy
+### 7.5 Add a new optimizer plugin
+
+Create `src/bhaskera/plugins/optimizers/my_opt.py`:
+
+```python
+from bhaskera.trainer.optimizer_registry import register_optimizer
+
+@register_optimizer("my_opt")
+def build_my_opt(model, train_cfg):
+    from bhaskera.trainer.optim import _get_default_param_groups
+    opt_cfg = train_cfg.optimizer
+    param_groups = _get_default_param_groups(model, opt_cfg.kwargs.get("weight_decay", 0.0))
+    return MyOptimizer(param_groups, lr=opt_cfg.kwargs.get("lr", train_cfg.lr))
+```
+
+Declare in YAML:
+```yaml
+plugins:
+  optimizers:
+    - "bhaskera.plugins.optimizers.my_opt"
+training:
+  optimizer:
+    backend: "plugin"
+    name: "my_opt"
+    kwargs:
+      lr: 1.0e-4
+```
+
+### 7.6 Add a new validation metric
+
+```python
+from bhaskera.evaluation.registry import register_metric
+
+@register_metric("bleu")
+class BleuMetric:
+    def compute(self, predictions, labels, losses) -> dict:
+        # predictions and labels are lists of CPU tensors
+        return {"validation/bleu": ...}
+```
+
+Enable in YAML: `evaluation.validation.metrics: [loss, perplexity, bleu]`. No import needed — `get_metric("bleu")` will lazy-import the module when the name is first requested.
+
+### 7.7 Add a new benchmark
+
+```python
+from bhaskera.evaluation.registry import register_benchmark
+
+@register_benchmark("mmlu")
+class MMLUBenchmark:
+    def run(self, model, tokenizer, cfg) -> dict:
+        # must be FSDP-safe: model is wrapped; call model(...) normally
+        return {"benchmark/mmlu_accuracy": ...}
+```
+
+Enable in YAML: `evaluation.benchmarks.tasks: [hellaswag, mmlu]`.
+
+### 7.8 Add a new distributed strategy
 
 Implement `wrap_xxx(model, cfg, local_rank, profile) -> nn.Module` and add a branch to `distributed.wrap.wrap_model`. The wrapped model must:
 
@@ -660,6 +873,8 @@ Implement `wrap_xxx(model, cfg, local_rank, profile) -> nn.Module` and add a bra
 
 `setup.sh` handles a layered CUDA detection strategy (manual override → env vars → `CUDA_HOME` → `nvcc` → `nvidia-smi` → Spack → SLURM probe job → CPU fallback). It writes `bhaskera-activate.sh` capturing the resolved CUDA hash for reproducibility. flash-attn is installed in a separate step with `--no-build-isolation` and `MAX_JOBS=4` because its setup.py imports torch at build time and is memory-hungry to compile.
 
+For QLoRA, `bitsandbytes` must be installed (`pip install bitsandbytes`). It is not in `pyproject.toml` because it is GPU-only and environment-specific; it is installed separately in setup.sh or the user's environment.
+
 ### 8.2 SLURM submission
 
 `scripts/submit.sh` uses `ray symmetric-run` (Ray ≥ 2.49) for symmetric placement across nodes. The port is randomised as `6379 + (SLURM_JOB_ID % 1000)` to avoid collisions with other users' Ray clusters on the same head node. The IB / RoCE / TCP detection chooses the NCCL transport before Ray starts.
@@ -672,9 +887,9 @@ If a checkpoint is suspected to be corrupt, remove its `.complete` sentinel (don
 
 ### 8.4 Debugging a hang
 
-The most common hang is an asymmetric collective — one rank reaches `all_reduce` and others never do (a crashed rank, a different code path, a different number of micro-steps). The first diagnostic is the NCCL timeout: with `NCCL_TIMEOUT=1800` and `TORCH_NCCL_BLOCKING_WAIT=1` set in `submit.sh`, a hang surfaces as a visible error within 30 minutes instead of running indefinitely. The `_verify_all_ranks_live` probe at the start of `wrap_model` catches the most common case (a rank failed to start) before any model work begins.
+The most common hang is an asymmetric collective — one rank reaches `all_reduce` and others never do (a crashed rank, a different code path, a different number of micro-steps). With `NCCL_TIMEOUT=1800` and `TORCH_NCCL_BLOCKING_WAIT=1` set in `submit.sh`, a hang surfaces as a visible error within 30 minutes. The `_verify_all_ranks_live` probe at the start of `wrap_model` catches the most common case before any model work begins.
 
-For a hang inside a training step, the Ray Dashboard's "Actors" view shows which workers are alive. A worker that died will appear dead; a worker that's hung will appear alive but with no recent metric updates.
+Evaluation adds two new hang surfaces: (a) `dist.broadcast_object_list` at the end of both `run_distributed_validation` and `run_benchmarks` — always called symmetrically on all ranks; and (b) `dist.all_reduce` in `run_distributed_validation` on the loss tensor — must fire on all ranks if any rank enters validation. The `evaluator.should_run_validation(step)` / `should_run_benchmark(step)` predicates are identical on all ranks for the same step, so no asymmetry is possible from the step-counter logic itself.
 
 ### 8.5 Diagnosing low MFU
 
@@ -693,26 +908,32 @@ Set `training.seed: 42` and `training.deterministic: true`. The deterministic mo
 ## 9. Repository layout
 
 ```
-Bhaskera-dashboard/
+Bhaskera-qlora/
 ├── bhaskera-activate.sh           # auto-generated by setup.sh; sourced in SLURM jobs
 ├── pyproject.toml                 # build, console_scripts, optional extras
 ├── requirements.txt               # pinned-deps snapshot (informational; install via setup.sh)
 ├── setup.sh                       # layered CUDA detection + venv + flash-attn install
 │
 ├── configs/                       # example YAMLs — one per scenario
-│   ├── 2node.yaml                 # 2x2-GPU FSDP run on Param2-17B
-│   ├── qwen.yaml                  # single-node Qwen MoE
-│   ├── qwen_ddp.yaml              # same model, DDP strategy
-│   ├── qwen_hybrid_shard.yaml     # FSDP HYBRID_SHARD variant
-│   ├── finetune_param_local_data.yaml
-│   ├── tokenize.yaml              # bhaskera-tokenize for HF datasets
-│   └── tokenize_qwen.yaml
+│   ├── 2node.yaml                 # 2×2-GPU FSDP run on Param2-17B MoE
+│   ├── param_qlora.yaml           # QLoRA + DDP on Param2-17B (A100 80 GB)
+│   ├── qwen_ddp.yaml              # Qwen2.5-14B dense, DDP strategy
+│   ├── qwen_hybrid_shard.yaml     # Qwen2.5-14B dense, FSDP HYBRID_SHARD
+│   ├── fsdp_cpt.yaml              # CPT on Qwen2.5-7B, FSDP
+│   ├── pre.yaml                   # CPT on Qwen2.5-1.5B, DDP
+│   ├── eval.yaml                  # CPT + evaluation subsystem (validation + benchmarks)
+│   ├── adadelta.yaml              # CPT with built-in Adadelta optimizer
+│   ├── lion.yaml                  # CPT with Lion optimizer plugin
+│   ├── cpt_token.yaml             # tokenize CPT data (local_cpt dataset)
+│   ├── tokenize.yaml              # tokenize UltraChat with Param2 tokenizer
+│   └── tokenize_qwen.yaml         # tokenize UltraChat with Qwen2.5 tokenizer
 │
 ├── scripts/
 │   └── submit.sh                  # SLURM batch script with NCCL auto-tuning
 │
 └── src/bhaskera/
-    ├── config.py                  # § 4.1
+    ├── config.py                  # § 4.1  — all dataclasses incl. EvaluationConfig,
+    │                              #           OptimizerConfig, PluginsConfig
     ├── introspect.py              # § 4.2
     │
     ├── data/                      # § 4.3
@@ -724,7 +945,8 @@ Bhaskera-dashboard/
     │   │   └── builtins.py        # chatml, alpaca, sharegpt
     │   └── datasets/
     │       ├── __init__.py        # imports trigger @register side-effects
-    │       ├── local_chat.py      # generic JSONL/JSON/Parquet loader
+    │       ├── local_chat.py      # generic JSONL/JSON/Parquet loader (SFT)
+    │       ├── local_cpt.py       # continuous-pack loader for CPT
     │       ├── openassistant.py
     │       ├── redpajama.py
     │       └── ultrachat.py
@@ -740,13 +962,16 @@ Bhaskera-dashboard/
     ├── models/                    # § 4.4
     │   ├── __init__.py
     │   ├── loader.py              # build_model + Liger Kernel
-    │   └── lora.py                # strategy-gated dtype handling
+    │   ├── lora.py                # strategy-gated dtype handling
+    │   └── quantization.py        # QLoRA BitsAndBytes config builder
     │
     ├── trainer/                   # § 4.6
     │   ├── __init__.py
-    │   ├── loop.py                # _run_epoch, _set_grad_sync
+    │   ├── loop.py                # _run_epoch, _set_grad_sync, Evaluator integration
     │   ├── moe.py                 # extract_aux_loss, _load_balancing_loss_from_logits
-    │   ├── optim.py               # AdamW(fused) + LinearLR → CosineAnnealingLR
+    │   ├── optim.py               # build_optimizer dispatch + warmup→cosine scheduler
+    │   ├── optimizer_registry.py  # OPTIMIZER_REGISTRY, @register_optimizer
+    │   ├── eval_lifecycle.py      # EvaluationLifecycle, DatasetCursor, offload helpers
     │   ├── precision.py           # resolve_autocast_dtype
     │   └── checkpointing.py       # save_and_prune by best-loss
     │
@@ -758,6 +983,30 @@ Bhaskera-dashboard/
     │   ├── dashboard.py           # bhaskera-dashboard (MLflow UI manager)
     │   ├── monitoring.py          # MonitoringContext, MLflow UI URL discovery
     │   └── worker.py              # worker_fn — per-GPU entry point
+    │
+    ├── evaluation/                # § 4.9
+    │   ├── __init__.py            # re-exports Evaluator, register_metric, register_benchmark
+    │   ├── evaluator.py           # Evaluator facade (should_run, run_validation, run_benchmarks)
+    │   ├── validation.py          # run_distributed_validation, chunked loss, optimizer offload
+    │   ├── benchmark_runner.py    # run_benchmarks (symmetric, broadcast from rank 0)
+    │   └── registry.py            # METRIC_REGISTRY, BENCHMARK_REGISTRY, lazy import
+    │
+    ├── plugins/                   # § 4.10
+    │   ├── __init__.py
+    │   ├── loader.py              # load_plugins(cfg) — import paths from cfg.plugins
+    │   ├── benchmarks/
+    │   │   ├── __init__.py
+    │   │   ├── arc_challenge.py   # ARC-Challenge (placeholder)
+    │   │   ├── arc_easy.py        # ARC-Easy (batched, distributed all-gather)
+    │   │   └── hellaswag.py       # HellaSwag (batched, distributed all-gather)
+    │   ├── metrics/
+    │   │   ├── __init__.py
+    │   │   ├── loss.py            # LossMetric
+    │   │   ├── perplexity.py      # PerplexityMetric
+    │   │   └── token_accuracy.py  # TokenAccuracyMetric
+    │   └── optimizers/
+    │       ├── __init__.py
+    │       └── lion.py            # Lion optimizer + @register_optimizer("lion")
     │
     └── utils/                     # § 4.8
         ├── __init__.py
@@ -778,18 +1027,23 @@ Bhaskera-dashboard/
 
 For each top-level key in YAML, see the corresponding dataclass in `src/bhaskera/config.py`:
 
-| YAML key      | Dataclass             | Notes                                                          |
-| ------------- | --------------------- | -------------------------------------------------------------- |
-| `model`       | `ModelConfig`         | `name`, `dtype` (`bfloat16`/`float16`/`float32`/`auto`), `attn_impl`, `trust_remote_code`, `use_liger_kernel`. |
-| `data`        | `DataConfig`          | `name`, `seq_len`, `num_workers`, `tokenized_path` / `val_tokenized_path`, `cache_dir`, `format`, `format_options`, `pack_sequences`. |
-| `lora`        | `LoraConfig`          | `enabled`, `r`, `alpha`, `dropout`, `target_modules` (`["auto"]` to introspect), `include_experts`, `freeze_router`, `modules_to_save`. |
-| `moe`         | `MoEConfig`           | `aux_loss_weight`, `router_z_loss_weight`, `freeze_router`, `log_expert_utilization`, `log_every_n_steps`. |
-| `training`    | `TrainingConfig`      | `batch_size` (per-GPU micro), `grad_accum`, `lr`, `weight_decay`, `max_steps`, `num_epochs`, `warmup_steps`, `max_grad_norm`, `grad_clip`, `max_grad_skip_steps`, `seed`, `deterministic`. |
-| `training.distributed` | `DistributedConfig` | `strategy: fsdp|ddp` + nested `fsdp` / `ddp` blocks.   |
-| `checkpoint`  | `CheckpointConfig`    | `enabled`, `save_dir`, `save_interval` (in epochs), `keep_last_n` (best by avg loss). |
-| `logging`     | `LoggingConfig`       | `tracker` (`"mlflow"` / `"wandb"` / `"ray"` / list / none), `project`, `run_name`, `mlflow_tracking_uri`, `mlflow_log_all_ranks`, `mlflow_log_artifacts_every`, `tags`, `group`. |
-| `inference`   | `InferenceConfig`     | `max_new_tokens`, `temperature`, `top_p`, `top_k`, `do_sample`, `batch_size`, `kv_cache` (`static`/`turboquant`/`none`), `device`, `torch_compile`, nested `turboquant` and `speculative`. |
-| `monitoring`  | `MonitoringConfig`    | `dashboard`, `dashboard_host`, `dashboard_port`, `metrics_export_port`, nested `metrics`. |
+| YAML key               | Dataclass             | Notes                                                          |
+| ---------------------- | --------------------- | -------------------------------------------------------------- |
+| `plugins`              | `PluginsConfig`       | `optimizers: list[str]` — fully-qualified module paths to import at startup. |
+| `model`                | `ModelConfig`         | `name`, `dtype`, `attn_impl`, `trust_remote_code`, `use_liger_kernel`, `quantization` (`"none"` default / `"qlora"`). |
+| `data`                 | `DataConfig`          | `name`, `seq_len`, `is_cpt` (CPT packing), `num_workers`, `tokenized_path` / `val_tokenized_path`, `cache_dir`, `format`, `format_options`, `path` / `train_path` / `val_path`, `pack_sequences`. |
+| `lora`                 | `LoraConfig`          | `enabled`, `r`, `alpha`, `dropout`, `target_modules` (`["auto"]` to introspect), `include_experts`, `freeze_router`, `modules_to_save`. |
+| `moe`                  | `MoEConfig`           | `aux_loss_weight`, `router_z_loss_weight`, `freeze_router`, `log_expert_utilization`, `log_every_n_steps`. |
+| `training`             | `TrainingConfig`      | `batch_size`, `grad_accum`, `lr`, `weight_decay`, `max_steps`, `num_epochs`, `warmup_steps`, `max_grad_norm`, `grad_clip`, `max_grad_skip_steps`, `seed`, `deterministic`. |
+| `training.optimizer`   | `OptimizerConfig`     | `backend: "default"\|"torch"\|"plugin"`, `class_name` (for `torch`), `name` (for `plugin`), `kwargs: dict`. |
+| `training.distributed` | `DistributedConfig`   | `strategy: fsdp\|ddp` + nested `fsdp` / `ddp` blocks. |
+| `checkpoint`           | `CheckpointConfig`    | `enabled`, `save_dir`, `save_interval` (in epochs), `keep_last_n` (best by avg loss). |
+| `logging`              | `LoggingConfig`       | `tracker` (`"mlflow"` / `"wandb"` / `"ray"` / list / none), `project`, `run_name`, `mlflow_tracking_uri`, `mlflow_log_all_ranks`, `mlflow_log_artifacts_every`, `tags`, `group`. |
+| `evaluation`           | `EvaluationConfig`    | `enabled`, `offload_optimizer`. |
+| `evaluation.validation`| `ValidationConfig`    | `dataset`, `every_n_steps`, `every_n_epochs`, `metrics: list[str]` (e.g. `[loss, perplexity, token_accuracy]`). |
+| `evaluation.benchmarks`| `BenchmarksConfig`    | `every_n_steps`, `every_n_epochs`, `tasks: list[str]` (e.g. `[hellaswag, arc_easy, arc_challenge]`). |
+| `inference`            | `InferenceConfig`     | `max_new_tokens`, `temperature`, `top_p`, `top_k`, `do_sample`, `batch_size`, `kv_cache` (`static`/`turboquant`/`none`), `device`, `torch_compile`, nested `turboquant` and `speculative`. |
+| `monitoring`           | `MonitoringConfig`    | `dashboard`, `dashboard_host`, `dashboard_port`, `metrics_export_port`, nested `metrics`. |
 
 ## Appendix B — Console scripts
 
@@ -808,11 +1062,13 @@ All entry points expect `--config <path-to-yaml>` except `bhaskera-diag` (which 
 ## Appendix C — Glossary
 
 - **AC** — Activation Checkpointing. Trade compute for memory by re-running the forward during backward instead of storing activations.
+- **CPT** — Continual Pre-Training. Training on raw text corpora with continuous sequence packing (`is_cpt: true`).
 - **DCP** — Distributed Checkpoint. PyTorch's sharded checkpoint API (`torch.distributed.checkpoint`).
 - **DDP** — Distributed Data Parallel. Replicate the model on every GPU, all-reduce gradients.
 - **FSDP / FSDP2** — Fully Sharded Data Parallel. Shard params, gradients, and optimizer state across GPUs; gather on demand. FSDP2 is the composable rewrite shipped in PyTorch 2.4.
 - **MFU** — Model FLOPs Utilisation. Achieved FLOPs / peak FLOPs, expressed as a percent.
 - **MoE** — Mixture of Experts. A subset of expert FFNs is activated per token by a router.
 - **PEFT** — Parameter-Efficient Fine-Tuning. The HuggingFace library for LoRA / IA3 / prefix tuning.
+- **QLoRA** — Quantized LoRA. 4-bit NF4 quantization of base weights (BitsAndBytes) with full-precision LoRA adapters trained on top. DDP-only in Bhaskera.
 - **Ray Train** — Ray's distributed training abstraction; `TorchTrainer.fit()` spawns workers and orchestrates the cluster.
 - **TurboQuant** — Bhaskera's KV-cache quantisation scheme (K4/V2 bits with a residual fp16 window).
