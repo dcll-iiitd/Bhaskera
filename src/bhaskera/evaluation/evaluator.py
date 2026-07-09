@@ -47,7 +47,7 @@ class Evaluator:
         every_n = self.eval_cfg.benchmarks.every_n_steps
         return every_n > 0 and step > 0 and step % every_n == 0
 
-    def run_validation(self, val_dataset) -> Dict[str, Any]:
+    def run_validation(self, val_dataset,optimizer=None) -> Dict[str, Any]:
         """Runs validation distributed, aggregates metrics, broadcasts results."""
         if not val_dataset:
             logger.warning("Validation enabled but val_dataset is None. Skipping.")

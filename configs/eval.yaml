@@ -23,7 +23,7 @@ lora:
 
 training:
   batch_size: 70
-  grad_accum: 4
+  grad_accum: 1
   
   # Global fallbacks if not defined inside kwargs
   lr: 2.0e-5

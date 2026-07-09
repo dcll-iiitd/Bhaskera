@@ -50,6 +50,7 @@ from .eval_lifecycle import (
     TrainingPipelineState,
     cursor_from_checkpoint_metadata,
     cursor_to_checkpoint_metadata,
+    _skip_torch_batches,
 )
 from .moe import compute_expert_utilization, extract_aux_loss
 from .optim import build_optimizer, build_scheduler
@@ -268,16 +269,7 @@ def _run_epoch(
     # On checkpoint resume, fast-forward the iterator past already-consumed
     # samples using dataset.skip(n). This is O(num_parquet_files), not
     # O(samples_consumed), so it is cheap even for large positions.
-    _raw_dataset = dataset
-    if samples_consumed > 0 and ray_dataset_shard is not None:
-        if rank == 0:
-            logger.info(
-                f"[loop] Checkpoint resume: skipping {samples_consumed} "
-                f"already-consumed samples via dataset.skip()"
-            )
-        _raw_dataset = ray_dataset_shard.skip(samples_consumed)
-
-    loader = _raw_dataset.iter_torch_batches(
+    _loader_kwargs = dict(
         batch_size=train_cfg.batch_size,
         local_shuffle_buffer_size=max(
             train_cfg.batch_size * cfg.data.local_shuffle_buffer_multiplier,
@@ -293,6 +285,18 @@ def _run_epoch(
         },
         device=device,
     )
+
+    if samples_consumed > 0 and ray_dataset_shard is not None:
+        if rank == 0:
+            logger.info(
+                f"[loop] Checkpoint resume: skipping {samples_consumed} "
+                f"already-consumed samples (manual drain — DataIterator has no .skip())"
+            )
+        loader = None
+        loader_iter = _skip_torch_batches(ray_dataset_shard, samples_consumed, **_loader_kwargs)
+    else:
+        loader = dataset.iter_torch_batches(**_loader_kwargs)
+        loader_iter = None  # set below via iter(loader), unchanged from current flow
 
     epoch_loss = 0.0
     epoch_aux_loss = 0.0
@@ -318,7 +322,8 @@ def _run_epoch(
     if throughput is not None:
         throughput.reset_step_clock()
 
-    loader_iter = iter(loader)
+    if loader_iter is None:
+        loader_iter = iter(loader)
     while step < train_cfg.max_steps:
         micro_losses: list[torch.Tensor] = []
         micro_aux_losses: list[torch.Tensor] = []
@@ -575,7 +580,7 @@ def _run_epoch(
             # ── Fallback: no Ray shard (single-GPU debug without Ray) ──
             # Uses the old in-line path without lifecycle teardown.
             if _needs_val:
-                val_metrics = evaluator.run_validation(val_dataset)
+                val_metrics = evaluator.run_validation(val_dataset, optimizer=optimizer)
                 if tracker and val_metrics:
                     tracker.log(val_metrics, step=step)
                 if rank == 0 and val_metrics:

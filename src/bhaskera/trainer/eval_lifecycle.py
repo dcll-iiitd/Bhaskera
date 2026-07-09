@@ -225,8 +225,21 @@ def _rank() -> int:
     if dist.is_available() and dist.is_initialized():
         return dist.get_rank()
     return 0
-
-
+def _skip_torch_batches(shard_iterator, n_samples, **iter_kwargs):
+    it = iter(shard_iterator.iter_torch_batches(**iter_kwargs))
+    consumed = 0
+    while consumed < n_samples:
+        try:
+            batch = next(it)
+        except StopIteration:
+            logger.warning(
+                f"[skip] Shard exhausted while skipping "
+                f"({consumed}/{n_samples} samples) — restarting iterator."
+            )
+            it = iter(shard_iterator.iter_torch_batches(**iter_kwargs))
+            break
+        consumed += int(batch["input_ids"].size(0))
+    return it
 # ---------------------------------------------------------------------------
 # Optimizer CPU offload / restore
 # ---------------------------------------------------------------------------
@@ -592,7 +605,7 @@ class EvaluationLifecycle:
         """
         cursor = self._state.cursor
         cfg = self._cfg
-        dataset = self._ray_dataset_shard
+        dataset = self._ray_dataset_shard  # a DataIterator/StreamSplitDataIterator — no .skip()
 
         if self._rank == 0:
             logger.info(
@@ -602,13 +615,8 @@ class EvaluationLifecycle:
                 f"global_step={cursor.global_step})"
             )
 
-        # Skip consumed samples — O(num_parquet_files), not O(samples)
-        if cursor.samples_consumed > 0:
-            dataset = dataset.skip(cursor.samples_consumed)
-
-        # Rebuild iterator with the same pipeline config
         data_cfg = cfg.data
-        iterator = dataset.iter_torch_batches(
+        iter_kwargs = dict(
             batch_size=cfg.training.batch_size,
             prefetch_batches=getattr(data_cfg, "prefetch_batches", 2),
             local_shuffle_buffer_size=(
@@ -617,6 +625,13 @@ class EvaluationLifecycle:
             ),
             dtypes={"input_ids": torch.long, "labels": torch.long, "attention_mask": torch.long},
         )
+
+        # DataIterator has no .skip() — it is already a per-worker split,
+        # not a lazily-composable Dataset. Fast-forward by draining batches.
+        if cursor.samples_consumed > 0:
+            iterator = _skip_torch_batches(dataset, cursor.samples_consumed, **iter_kwargs)
+        else:
+            iterator = dataset.iter_torch_batches(**iter_kwargs)
 
         self._new_iterator = iterator
         return iterator
