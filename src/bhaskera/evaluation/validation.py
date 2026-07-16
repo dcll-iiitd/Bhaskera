@@ -189,18 +189,22 @@ def run_distributed_validation(
                 out = model(**forward_kwargs)
                 full_logits = out.logits
 
+                # ── SHIFT FOR NEXT-TOKEN PREDICTION ─────────────────────────
+                shift_logits = full_logits[:, :-1, :].contiguous()
+                shift_labels = labels[:, 1:].contiguous()
+
                 loss = _chunked_causal_lm_loss(
-                    logits_fn=lambda s, e: full_logits[:, s:e, :],
-                    labels=labels,
+                    logits_fn=lambda s, e: shift_logits[:, s:e, :],
+                    labels=shift_labels,
                     chunk_seq_len=LOSS_CHUNK_SEQ_LEN,
                 )
                 local_losses.append(loss.item())
 
                 if needs_preds:
-                    local_preds.append(full_logits.argmax(dim=-1).cpu())
-                    local_labels.append(labels.cpu())
+                    local_preds.append(shift_logits.argmax(dim=-1).cpu())
+                    local_labels.append(shift_labels.cpu())
 
-                del out, full_logits, loss
+                del out, full_logits, shift_logits, loss
 
                 if (batch_idx + 1) % MEMORY_CLEANUP_EVERY_N_BATCHES == 0:
                     gc.collect()
