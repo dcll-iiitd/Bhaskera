@@ -60,6 +60,25 @@ def main() -> None:
             except ImportError:
                 logger.warning("Could not import build_val_ray_dataset")
 
+    # ── Dynamic Resource Allocation ──
+    # Automatically allocate resources without hardcoding magic numbers.
+    total_cpus = os.cpu_count() or 64
+    data_workers = getattr(cfg.data, "num_workers", 0)
+    
+    # Ray Data operators (like Repartition/AllToAll) require extra unallocated CPUs to run.
+    # We guarantee a safety cushion of either the YAML workers or 16 CPUs, whichever is larger.
+    data_cushion = max(data_workers, 16)
+    
+    # Reserve the cushion, then divide the remainder among the GPU training workers
+    available_cpus = max(1, total_cpus - data_cushion)
+    cpus_per_worker = max(1, available_cpus // num_workers)
+
+    logger.info(
+        f"Dynamic Resource Allocation | System: {total_cpus} CPUs, {num_workers} GPUs. "
+        f"Reserved data cushion of {data_cushion} CPUs (YAML workers: {data_workers}). "
+        f"Allocating {cpus_per_worker} CPUs per GPU training worker."
+    )
+
     trainer = TorchTrainer(
         train_loop_per_worker=worker_fn,
         train_loop_config=cfg.as_dict(),
@@ -67,7 +86,10 @@ def main() -> None:
         scaling_config=ScalingConfig(
             num_workers=num_workers,
             use_gpu=True,
-            resources_per_worker={"GPU": 1},
+            resources_per_worker={
+                "GPU": 1,
+                "CPU": cpus_per_worker,  # Dynamically bounded to guarantee headroom
+            },
         ),
         run_config=RunConfig(
             name=cfg.logging.run_name,
