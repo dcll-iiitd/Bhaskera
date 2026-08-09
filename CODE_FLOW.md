@@ -71,14 +71,14 @@ Installed commands can also be run as modules, for example
 
 ### `bhaskera-train`
 
-| Option | Default | Effect |
-| --- | --- | --- |
-| `--config PATH` | required | YAML configuration file. |
-| `--num-workers N` | detected GPUs | One Ray training worker per GPU. |
-| `--max-failures N` | `2` | Ray Train restart tolerance. |
-| `--storage-path PATH` | `checkpoint.save_dir` | Ray Train result/checkpoint root. |
-| `--no-dashboard` | false | Disable Ray Dashboard and its automatic Ray logger. |
-| `--dashboard-port PORT` | YAML / `8265` | Override the Ray Dashboard port. |
+| Option                  | Default               | Effect                                              |
+| ----------------------- | --------------------- | --------------------------------------------------- |
+| `--config PATH`         | required              | YAML configuration file.                            |
+| `--num-workers N`       | detected GPUs         | One Ray training worker per GPU.                    |
+| `--max-failures N`      | `2`                   | Ray Train restart tolerance.                        |
+| `--storage-path PATH`   | `checkpoint.save_dir` | Ray Train result/checkpoint root.                   |
+| `--no-dashboard`        | false                 | Disable Ray Dashboard and its automatic Ray logger. |
+| `--dashboard-port PORT` | YAML / `8265`         | Override the Ray Dashboard port.                    |
 
 `RAY_ADDRESS` selects an existing cluster. Without it, the launcher stops stale local
 Ray state and creates a local cluster. `SLURM_NNODES` and `SLURM_GPUS_PER_NODE` override
@@ -86,30 +86,30 @@ local GPU counting when both are present.
 
 ### `bhaskera-tokenize`
 
-| Option | Default | Effect |
-| --- | --- | --- |
-| `--config PATH` | required | YAML configuration file. |
-| `--dataset NAME` | `data.name` | Dataset registry key. |
-| `--storage-path PATH` | `data.cache_dir` | Parquet cache root; one must be set. |
-| `--overwrite` | false | Ignore an existing valid cache. |
-| `--num-workers N` | `data.num_workers` | Ray CPU tokenizer workers. |
-| `--split {train,val,both,none}` | `train` | Split handling; only `local` supports separate train/val. |
-| `--format NAME` | `data.format` | `chatml`, `alpaca`, `sharegpt`, or a registered renderer. |
-| `--train-path PATH` | `data.train_path` | Local training file, directory, or glob. |
-| `--val-path PATH` | `data.val_path` | Local validation file, directory, or glob. |
+| Option                          | Default            | Effect                                                    |
+| ------------------------------- | ------------------ | --------------------------------------------------------- |
+| `--config PATH`                 | required           | YAML configuration file.                                  |
+| `--dataset NAME`                | `data.name`        | Dataset registry key.                                     |
+| `--storage-path PATH`           | `data.cache_dir`   | Parquet cache root; one must be set.                      |
+| `--overwrite`                   | false              | Ignore an existing valid cache.                           |
+| `--num-workers N`               | `data.num_workers` | Ray CPU tokenizer workers.                                |
+| `--split {train,val,both,none}` | `train`            | Split handling; only `local` supports separate train/val. |
+| `--format NAME`                 | `data.format`      | `chatml`, `alpaca`, `sharegpt`, or a registered renderer. |
+| `--train-path PATH`             | `data.train_path`  | Local training file, directory, or glob.                  |
+| `--val-path PATH`               | `data.val_path`    | Local validation file, directory, or glob.                |
 
 ### `bhaskera-infer`
 
 Exactly one of `--prompt TEXT` and `--prompt-file FILE` is required.
 
-| Group | Options |
-| --- | --- |
-| Model/config | `--config PATH`, `--model ID`, `--device auto\|cuda\|cpu\|mps` |
-| Generation | `--max-new-tokens N`, `--temperature F`, `--top-p F`, `--top-k N`, `--no-sample` |
-| KV cache | `--kv-cache static\|turboquant\|none`, `--key-bits N`, `--value-bits N`, `--residual-window N` |
-| Speculation | `--speculative`, `--draft-model ID`, `--num-draft-tokens N` |
-| Rendering | `--show-thinking`, `--system-prompt TEXT`, `--return-full` |
-| Output/runtime | `--output-file FILE`, `--torch-compile`, `-v` / `--verbose` |
+| Group          | Options                                                                                        |
+| -------------- | ---------------------------------------------------------------------------------------------- |
+| Model/config   | `--config PATH`, `--model ID`, `--device auto\|cuda\|cpu\|mps`                                 |
+| Generation     | `--max-new-tokens N`, `--temperature F`, `--top-p F`, `--top-k N`, `--no-sample`               |
+| KV cache       | `--kv-cache static\|turboquant\|none`, `--key-bits N`, `--value-bits N`, `--residual-window N` |
+| Speculation    | `--speculative`, `--draft-model ID`, `--num-draft-tokens N`                                    |
+| Rendering      | `--show-thinking`, `--system-prompt TEXT`, `--return-full`                                     |
+| Output/runtime | `--output-file FILE`, `--torch-compile`, `-v` / `--verbose`                                    |
 
 CLI generation values override YAML. `BHASKERA_BACKEND=hf` disables automatic vLLM
 selection. Note: `--device` defaults to `auto`, so CLI assembly currently replaces
@@ -125,14 +125,14 @@ but the CLI currently calls generic `generate()`, so it does not affect that pat
 Usage: `bhaskera-dashboard [start|stop|status|tunnel] [options]`; action defaults to
 `start`.
 
-| Option | Default | Effect |
-| --- | --- | --- |
-| `--store URI` | `~/mlflow-runs` | File-backed MLflow store. |
-| `--port N` | `5000` | UI and SSH tunnel port. |
-| `--login-node HOST` | current hostname | Tunnel destination shown to the user. |
-| `--user USER` | omitted | SSH username in the tunnel command. |
-| `--no-save` | false | Do not save start settings under `~/.bhaskera/`. |
-| `-v`, `--verbose` | false | Debug logging. |
+| Option              | Default          | Effect                                           |
+| ------------------- | ---------------- | ------------------------------------------------ |
+| `--store URI`       | `~/mlflow-runs`  | File-backed MLflow store.                        |
+| `--port N`          | `5000`           | UI and SSH tunnel port.                          |
+| `--login-node HOST` | current hostname | Tunnel destination shown to the user.            |
+| `--user USER`       | omitted          | SSH username in the tunnel command.              |
+| `--no-save`         | false            | Do not save start settings under `~/.bhaskera/`. |
+| `-v`, `--verbose`   | false            | Debug logging.                                   |
 
 `MLFLOW_TRACKING_URI=file://...` and `MLFLOW_PORT` are environment overrides; explicit
 CLI values win. State is persisted in `~/.bhaskera/mlflow-ui.json`.
@@ -151,126 +151,126 @@ Fields not supplied use these defaults from `src/bhaskera/config.py`.
 
 ### Model, Adapters, and MoE
 
-| Path | Default / choices |
-| --- | --- |
-| `model.name` | `tiiuae/falcon-7b`; Hugging Face ID or registered model key |
-| `model.dtype` | `bfloat16`; `float32`, `float16`, `bfloat16`, or `auto` where supported |
-| `model.attn_impl` | `null`; forwarded as HF `attn_implementation` |
-| `model.trust_remote_code` | `false` |
-| `model.use_liger_kernel` | `true` |
-| `model.quantization` | `none`; `qlora` is implemented and requires DDP/BitsAndBytes |
-| `lora.enabled` | `false` |
-| `lora.r`, `lora.alpha`, `lora.dropout` | `16`, `32`, `0.05` |
-| `lora.target_modules` | `[auto]`; explicit module-name list also accepted |
-| `lora.include_experts` | `false` |
-| `lora.freeze_router` | `true` |
-| `lora.modules_to_save` | `[]` |
-| `moe.aux_loss_weight` | `0.01` |
-| `moe.router_z_loss_weight` | `0.001` |
-| `moe.freeze_router` | `true` |
-| `moe.log_expert_utilization` | `true` |
-| `moe.log_every_n_steps` | `10` |
+| Path                                   | Default / choices                                                       |
+| -------------------------------------- | ----------------------------------------------------------------------- |
+| `model.name`                           | `tiiuae/falcon-7b`; Hugging Face ID or registered model key             |
+| `model.dtype`                          | `bfloat16`; `float32`, `float16`, `bfloat16`, or `auto` where supported |
+| `model.attn_impl`                      | `null`; forwarded as HF `attn_implementation`                           |
+| `model.trust_remote_code`              | `false`                                                                 |
+| `model.use_liger_kernel`               | `true`                                                                  |
+| `model.quantization`                   | `none`; `qlora` is implemented and requires DDP/BitsAndBytes            |
+| `lora.enabled`                         | `false`                                                                 |
+| `lora.r`, `lora.alpha`, `lora.dropout` | `16`, `32`, `0.05`                                                      |
+| `lora.target_modules`                  | `[auto]`; explicit module-name list also accepted                       |
+| `lora.include_experts`                 | `false`                                                                 |
+| `lora.freeze_router`                   | `true`                                                                  |
+| `lora.modules_to_save`                 | `[]`                                                                    |
+| `moe.aux_loss_weight`                  | `0.01`                                                                  |
+| `moe.router_z_loss_weight`             | `0.001`                                                                 |
+| `moe.freeze_router`                    | `true`                                                                  |
+| `moe.log_expert_utilization`           | `true`                                                                  |
+| `moe.log_every_n_steps`                | `10`                                                                    |
 
 ### Data and Tokenization
 
-| Path | Default / choices |
-| --- | --- |
-| `data.name` | `ultrachat`; built-ins listed under Registries below |
-| `data.seq_len` | `2048` |
-| `data.num_workers` | `4` |
-| `data.is_cpt` | `false`; enable continual-pretraining packing |
-| `data.tokenized_path` | `null`; training cache path |
-| `data.val_tokenized_path` | `null`; validation cache path |
-| `data.cache_dir` | `null`; required by tokenization CLI |
-| `data.overwrite_cache` | `false` |
-| `data.tokenize_batch_size` | `128` |
-| `data.tokenize_compression` | `snappy`; `snappy`, `zstd`, or `none` |
-| `data.prefetch_batches` | `2` |
-| `data.local_shuffle_buffer_multiplier` | `10` |
-| `data.pack_sequences` | `false`; compatibility alias for continuous packing |
-| `data.format` | `null`; `chatml`, `alpaca`, `sharegpt`, or custom |
-| `data.format_options` | `{}`; renderer-specific mapping |
-| `data.path` | `null`; shorthand local training source |
-| `data.train_path`, `data.val_path` | `null`; local split sources |
+| Path                                   | Default / choices                                    |
+| -------------------------------------- | ---------------------------------------------------- |
+| `data.name`                            | `ultrachat`; built-ins listed under Registries below |
+| `data.seq_len`                         | `2048`                                               |
+| `data.num_workers`                     | `4`                                                  |
+| `data.is_cpt`                          | `false`; enable continual-pretraining packing        |
+| `data.tokenized_path`                  | `null`; training cache path                          |
+| `data.val_tokenized_path`              | `null`; validation cache path                        |
+| `data.cache_dir`                       | `null`; required by tokenization CLI                 |
+| `data.overwrite_cache`                 | `false`                                              |
+| `data.tokenize_batch_size`             | `128`                                                |
+| `data.tokenize_compression`            | `snappy`; `snappy`, `zstd`, or `none`                |
+| `data.prefetch_batches`                | `2`                                                  |
+| `data.local_shuffle_buffer_multiplier` | `10`                                                 |
+| `data.pack_sequences`                  | `false`; compatibility alias for continuous packing  |
+| `data.format`                          | `null`; `chatml`, `alpaca`, `sharegpt`, or custom    |
+| `data.format_options`                  | `{}`; renderer-specific mapping                      |
+| `data.path`                            | `null`; shorthand local training source              |
+| `data.train_path`, `data.val_path`     | `null`; local split sources                          |
 
 ### Training and Distribution
 
-| Path | Default / choices |
-| --- | --- |
-| `training.batch_size` | `2` per worker |
-| `training.grad_accum` | `4` micro-batches per optimizer step |
-| `training.lr`, `training.weight_decay` | `2e-4`, `0.01` |
-| `training.max_steps`, `training.num_epochs` | `1000`, `1`; first limit reached stops training |
-| `training.warmup_steps` | `100`; followed by cosine decay |
-| `training.max_grad_norm`, `training.grad_clip` | `1.0`, `1.0` |
-| `training.max_grad_skip_steps` | `100` |
-| `training.seed`, `training.deterministic` | `42`, `false` |
-| `training.optimizer.backend` | `default`; `default`, `torch`, or `plugin` |
-| `training.optimizer.class_name` | `null`; a `torch.optim` class for `torch` backend |
-| `training.optimizer.name` | `null`; registry key for `plugin` backend |
-| `training.optimizer.kwargs` | `{}`; passed to selected optimizer |
-| `training.distributed.strategy` | `fsdp`; `fsdp` or `ddp` |
-| `training.distributed.fsdp.sharding_strategy` | `FULL_SHARD` |
-| `training.distributed.fsdp.transformer_layer_cls` | `[]`; introspection is preferred |
-| `training.distributed.fsdp.param_dtype` | `bfloat16` |
-| `training.distributed.fsdp.reduce_dtype` | `bfloat16` |
-| `training.distributed.fsdp.buffer_dtype` | `bfloat16` |
-| `training.distributed.fsdp.activation_checkpointing` | `true` |
-| `training.distributed.fsdp.cpu_offload` | `false` |
-| `training.distributed.fsdp.shard_experts_individually` | `true` |
-| `training.distributed.ddp.find_unused_parameters` | `false`; MoE may force it on |
-| `training.distributed.ddp.gradient_as_bucket_view` | `true` |
-| `training.distributed.ddp.broadcast_buffers` | `false` |
-| `training.distributed.ddp.activation_checkpointing` | `false` |
-| `training.distributed.ddp.static_graph` | `false`; incompatible paths may force it off |
+| Path                                                   | Default / choices                                 |
+| ------------------------------------------------------ | ------------------------------------------------- |
+| `training.batch_size`                                  | `2` per worker                                    |
+| `training.grad_accum`                                  | `4` micro-batches per optimizer step              |
+| `training.lr`, `training.weight_decay`                 | `2e-4`, `0.01`                                    |
+| `training.max_steps`, `training.num_epochs`            | `1000`, `1`; first limit reached stops training   |
+| `training.warmup_steps`                                | `100`; followed by cosine decay                   |
+| `training.max_grad_norm`, `training.grad_clip`         | `1.0`, `1.0`                                      |
+| `training.max_grad_skip_steps`                         | `100`                                             |
+| `training.seed`, `training.deterministic`              | `42`, `false`                                     |
+| `training.optimizer.backend`                           | `default`; `default`, `torch`, or `plugin`        |
+| `training.optimizer.class_name`                        | `null`; a `torch.optim` class for `torch` backend |
+| `training.optimizer.name`                              | `null`; registry key for `plugin` backend         |
+| `training.optimizer.kwargs`                            | `{}`; passed to selected optimizer                |
+| `training.distributed.strategy`                        | `fsdp`; `fsdp` or `ddp`                           |
+| `training.distributed.fsdp.sharding_strategy`          | `FULL_SHARD`                                      |
+| `training.distributed.fsdp.transformer_layer_cls`      | `[]`; introspection is preferred                  |
+| `training.distributed.fsdp.param_dtype`                | `bfloat16`                                        |
+| `training.distributed.fsdp.reduce_dtype`               | `bfloat16`                                        |
+| `training.distributed.fsdp.buffer_dtype`               | `bfloat16`                                        |
+| `training.distributed.fsdp.activation_checkpointing`   | `true`                                            |
+| `training.distributed.fsdp.cpu_offload`                | `false`                                           |
+| `training.distributed.fsdp.shard_experts_individually` | `true`                                            |
+| `training.distributed.ddp.find_unused_parameters`      | `false`; MoE may force it on                      |
+| `training.distributed.ddp.gradient_as_bucket_view`     | `true`                                            |
+| `training.distributed.ddp.broadcast_buffers`           | `false`                                           |
+| `training.distributed.ddp.activation_checkpointing`    | `false`                                           |
+| `training.distributed.ddp.static_graph`                | `false`; incompatible paths may force it off      |
 
 ### Checkpointing, Logging, and Monitoring
 
-| Path | Default / choices |
-| --- | --- |
-| `checkpoint.enabled` | `true` |
-| `checkpoint.save_dir` | `./checkpoints` |
-| `checkpoint.save_interval` | `1` |
-| `checkpoint.keep_last_n` | `2` |
-| `logging.tracker` | `null`; string/list of `ray`, `mlflow`, `wandb`, or off aliases `none`, `off`, `false`, `""` |
-| `logging.project`, `logging.run_name` | `bhaskera`, `run` |
-| `logging.mlflow_tracking_uri` | `null` |
-| `logging.log_gpu_every_n_steps` | `10` |
-| `logging.tags`, `logging.group` | `[]`, `null` |
-| `monitoring.dashboard` | `true`; automatically adds the Ray logger |
-| `monitoring.dashboard_host`, `monitoring.dashboard_port` | `0.0.0.0`, `8265` |
-| `monitoring.metrics_export_port` | `8080` |
-| `monitoring.metrics.enabled` | `true` |
-| `monitoring.metrics.system_every_n_steps` | `10` |
-| `monitoring.metrics.cuda_every_n_steps` | `10` |
-| `monitoring.metrics.gpu`, `.cpu`, `.cuda_memory`, `.throughput` | all `true` |
-| `monitoring.metrics.peak_tflops_per_gpu` | `312.0` |
-| `monitoring.metrics.throughput_window`, `.throughput_warmup` | `50`, `5` |
+| Path                                                            | Default / choices                                                                            |
+| --------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `checkpoint.enabled`                                            | `true`                                                                                       |
+| `checkpoint.save_dir`                                           | `./checkpoints`                                                                              |
+| `checkpoint.save_interval`                                      | `1`                                                                                          |
+| `checkpoint.keep_last_n`                                        | `2`                                                                                          |
+| `logging.tracker`                                               | `null`; string/list of `ray`, `mlflow`, `wandb`, or off aliases `none`, `off`, `false`, `""` |
+| `logging.project`, `logging.run_name`                           | `bhaskera`, `run`                                                                            |
+| `logging.mlflow_tracking_uri`                                   | `null`                                                                                       |
+| `logging.log_gpu_every_n_steps`                                 | `10`                                                                                         |
+| `logging.tags`, `logging.group`                                 | `[]`, `null`                                                                                 |
+| `monitoring.dashboard`                                          | `true`; automatically adds the Ray logger                                                    |
+| `monitoring.dashboard_host`, `monitoring.dashboard_port`        | `0.0.0.0`, `8265`                                                                            |
+| `monitoring.metrics_export_port`                                | `8080`                                                                                       |
+| `monitoring.metrics.enabled`                                    | `true`                                                                                       |
+| `monitoring.metrics.system_every_n_steps`                       | `10`                                                                                         |
+| `monitoring.metrics.cuda_every_n_steps`                         | `10`                                                                                         |
+| `monitoring.metrics.gpu`, `.cpu`, `.cuda_memory`, `.throughput` | all `true`                                                                                   |
+| `monitoring.metrics.peak_tflops_per_gpu`                        | `312.0`                                                                                      |
+| `monitoring.metrics.throughput_window`, `.throughput_warmup`    | `50`, `5`                                                                                    |
 
 ### Evaluation and Inference
 
-| Path | Default / choices |
-| --- | --- |
-| `evaluation.enabled` | `false` |
-| `evaluation.offload_optimizer` | declared default `true`; YAML loader currently does not apply an override |
-| `evaluation.validation.dataset` | `validation` |
-| `evaluation.validation.every_n_steps`, `.every_n_epochs` | `500`, `1` |
-| `evaluation.validation.metrics` | `[loss, perplexity]` |
-| `evaluation.benchmarks.every_n_steps`, `.every_n_epochs` | `2000`, `1` |
-| `evaluation.benchmarks.tasks` | `[]` |
-| `inference.max_new_tokens` | `512` |
-| `inference.temperature`, `.top_p`, `.top_k` | `1.0`, `0.9`, `50` |
-| `inference.do_sample`, `.batch_size` | `true`, `1` |
-| `inference.kv_cache` | `static`; `static`, `turboquant`, or `none` |
-| `inference.device` | `auto` |
-| `inference.torch_compile` | `false` |
-| `inference.turboquant.enabled` | `false`; selecting `turboquant` via CLI enables it |
-| `inference.turboquant.key_bits`, `.value_bits` | `4`, `2` |
-| `inference.turboquant.residual_window`, `.protected_layers` | `128`, `2` |
-| `inference.speculative.enabled` | `false` |
-| `inference.speculative.draft_model_name` | empty string |
-| `inference.speculative.num_draft_tokens` | `5` |
-| `plugins.optimizers` | `[]`; importable module paths loaded in driver and workers |
+| Path                                                        | Default / choices                                                         |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `evaluation.enabled`                                        | `false`                                                                   |
+| `evaluation.offload_optimizer`                              | declared default `true`; YAML loader currently does not apply an override |
+| `evaluation.validation.dataset`                             | `validation`                                                              |
+| `evaluation.validation.every_n_steps`, `.every_n_epochs`    | `500`, `1`                                                                |
+| `evaluation.validation.metrics`                             | `[loss, perplexity]`                                                      |
+| `evaluation.benchmarks.every_n_steps`, `.every_n_epochs`    | `2000`, `1`                                                               |
+| `evaluation.benchmarks.tasks`                               | `[]`                                                                      |
+| `inference.max_new_tokens`                                  | `512`                                                                     |
+| `inference.temperature`, `.top_p`, `.top_k`                 | `1.0`, `0.9`, `50`                                                        |
+| `inference.do_sample`, `.batch_size`                        | `true`, `1`                                                               |
+| `inference.kv_cache`                                        | `static`; `static`, `turboquant`, or `none`                               |
+| `inference.device`                                          | `auto`                                                                    |
+| `inference.torch_compile`                                   | `false`                                                                   |
+| `inference.turboquant.enabled`                              | `false`; selecting `turboquant` via CLI enables it                        |
+| `inference.turboquant.key_bits`, `.value_bits`              | `4`, `2`                                                                  |
+| `inference.turboquant.residual_window`, `.protected_layers` | `128`, `2`                                                                |
+| `inference.speculative.enabled`                             | `false`                                                                   |
+| `inference.speculative.draft_model_name`                    | empty string                                                              |
+| `inference.speculative.num_draft_tokens`                    | `5`                                                                       |
+| `plugins.optimizers`                                        | `[]`; importable module paths loaded in driver and workers                |
 
 ### Declared but Currently Inactive Fields
 
