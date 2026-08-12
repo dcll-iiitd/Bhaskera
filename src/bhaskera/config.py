@@ -112,7 +112,7 @@ class DataConfig:
     name: str = "ultrachat"
     seq_len: int = 2048
     num_workers: int = 4
-    
+
     is_cpt: bool = False  # Continual Pre-Training continuous packing flag
 
     # ── Phase 1: persistent-cache plumbing ─────────────────────────────────
@@ -174,7 +174,7 @@ class TrainingConfig:
     max_grad_norm: float = 1.0
     seed: int = 42
     deterministic: bool = False
-    
+
     grad_clip: Optional[float] = 1.0          # Phase 1: used by no_sync loop
     max_grad_skip_steps: int = 100
     distributed: DistributedConfig = field(default_factory=DistributedConfig)
@@ -186,6 +186,7 @@ class CheckpointConfig:
     enabled: bool = True
     save_dir: str = "./checkpoints"
     save_interval: int = 1
+    save_interval_unit: str = "epoch"
     keep_last_n: int = 2
 
 
@@ -287,7 +288,7 @@ def _dict_to_config(raw: dict) -> Config:
     prom_raw    = _get(raw, "monitoring", "prometheus", default={}) or {}
     graf_raw    = _get(raw, "monitoring", "grafana",    default={}) or {}
     metrics_raw = _get(raw, "monitoring", "metrics",    default={}) or {}
-    
+
     plugins_raw = _get(raw, "plugins", default={}) or {}
 
     return Config(
@@ -391,6 +392,7 @@ def _dict_to_config(raw: dict) -> Config:
             enabled=bool(ckpt_raw.get("enabled", True)),
             save_dir=str(ckpt_raw.get("save_dir", "./checkpoints")),
             save_interval=int(ckpt_raw.get("save_interval", 1)),
+            save_interval_unit=str(ckpt_raw.get("save_interval_unit", "epoch")).lower(),
             keep_last_n=int(ckpt_raw.get("keep_last_n", 2)),
         ),
         logging=LoggingConfig(
