@@ -451,6 +451,31 @@ def _run_epoch(
         epoch_steps += 1
         step += 1
 
+        if (
+            ckpt_cfg.enabled
+            and ckpt_cfg.save_interval_unit == "steps"
+            and step % ckpt_cfg.save_interval == 0
+        ):
+            _ckpt_cursor = DatasetCursor(
+                samples_consumed=_step_samples_consumed,
+                tokens_consumed=_step_tokens_consumed,
+                global_step=step,
+                epoch=epoch,
+            )
+            if dist.is_available() and dist.is_initialized():
+                dist.barrier()
+            best_ckpts = save_and_prune(
+                model=model,
+                optimizer=optimizer,
+                step=step,
+                avg_loss=loss_ema if loss_ema is not None else window_loss,
+                ckpt_cfg=ckpt_cfg,
+                rank=rank,
+                best_ckpts=best_ckpts,
+                cursor_meta=cursor_to_checkpoint_metadata(_ckpt_cursor),
+            )
+            if throughput is not None:
+                throughput.reset_step_clock()
         # ── Throughput ──────────────────────────────────────────────
         throughput_metrics: dict[str, float] = {}
         if throughput is not None:
@@ -615,7 +640,12 @@ def _run_epoch(
             tracker.log(epoch_metrics, step=step)
 
     # ── Checkpoint ──────────────────────────────────────────────────
-    if ckpt_cfg.enabled and (epoch + 1) % ckpt_cfg.save_interval == 0:
+    # ── Checkpoint (epoch-based mode only) ───────────────────────────
+    if (
+        ckpt_cfg.enabled
+        and ckpt_cfg.save_interval_unit != "steps"
+        and (epoch + 1) % ckpt_cfg.save_interval == 0
+    ):
         _ckpt_cursor = DatasetCursor(
             samples_consumed=_step_samples_consumed,
             tokens_consumed=_step_tokens_consumed,
