@@ -98,6 +98,56 @@ def _set_grad_sync(model: torch.nn.Module, enabled: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Periodic checkpoint save (shared by the step-trigger and the eval-overlap
+# path so there is exactly one save routine, called at most once per step)
+# ---------------------------------------------------------------------------
+
+def _save_periodic_checkpoint(
+    *,
+    model,
+    optimizer,
+    ckpt_cfg,
+    rank: int,
+    best_ckpts: list,
+    step: int,
+    epoch: int,
+    samples_consumed: int,
+    tokens_consumed: int,
+    avg_loss: float,
+) -> list:
+    """
+    Save + prune a step-interval checkpoint.
+
+    Called from exactly one place in _run_epoch's per-step block, after
+    validation/benchmarks (if any) have run and — on the lifecycle path —
+    after torch.inference_mode() has exited. It must NOT be called from
+    inside `with lifecycle.run(...):` (i.e. inside inference_mode()):
+    DCP's cpu_offload state-dict path calls `.to(cpu_device)` on DTensor
+    shards, which under inference_mode dispatches through
+    `aten.to.dtype_layout` — an overload DTensor's sharding propagator has
+    no rule for, and raises NotImplementedError.
+    """
+    cursor = DatasetCursor(
+        samples_consumed=samples_consumed,
+        tokens_consumed=tokens_consumed,
+        global_step=step,
+        epoch=epoch,
+    )
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+    return save_and_prune(
+        model=model,
+        optimizer=optimizer,
+        step=step,
+        avg_loss=avg_loss,
+        ckpt_cfg=ckpt_cfg,
+        rank=rank,
+        best_ckpts=best_ckpts,
+        cursor_meta=cursor_to_checkpoint_metadata(cursor),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -451,31 +501,22 @@ def _run_epoch(
         epoch_steps += 1
         step += 1
 
-        if (
+        # ── What's due this step? (single source of truth) ────────────
+        # All three triggers are computed together, up front, BEFORE any
+        # of them run. That's what makes the overlap case detectable:
+        # if a checkpoint and an evaluation are due on the same step, we
+        # fold the checkpoint save into the evaluation window below
+        # instead of running two separate save/barrier cycles.
+        _needs_ckpt = (
             ckpt_cfg.enabled
             and ckpt_cfg.save_interval_unit == "steps"
             and step % ckpt_cfg.save_interval == 0
-        ):
-            _ckpt_cursor = DatasetCursor(
-                samples_consumed=_step_samples_consumed,
-                tokens_consumed=_step_tokens_consumed,
-                global_step=step,
-                epoch=epoch,
-            )
-            if dist.is_available() and dist.is_initialized():
-                dist.barrier()
-            best_ckpts = save_and_prune(
-                model=model,
-                optimizer=optimizer,
-                step=step,
-                avg_loss=loss_ema if loss_ema is not None else window_loss,
-                ckpt_cfg=ckpt_cfg,
-                rank=rank,
-                best_ckpts=best_ckpts,
-                cursor_meta=cursor_to_checkpoint_metadata(_ckpt_cursor),
-            )
-            if throughput is not None:
-                throughput.reset_step_clock()
+        )
+        _needs_val   = evaluator.should_run_validation(step)
+        _needs_bench = evaluator.should_run_benchmark(step)
+        _ckpt_done_this_step = False
+        _avg_loss_for_ckpt = loss_ema if loss_ema is not None else window_loss
+
         # ── Throughput ──────────────────────────────────────────────
         throughput_metrics: dict[str, float] = {}
         if throughput is not None:
@@ -542,10 +583,8 @@ def _run_epoch(
                 if sysm:
                     tracker.log(sysm, step=step)
 
-        # ── Evaluation & Benchmarking ──────────────────────────────
+        # ── Evaluation & Benchmarking (+ checkpoint, if it overlaps) ──
         ran_eval = False
-        _needs_val   = evaluator.should_run_validation(step)
-        _needs_bench = evaluator.should_run_benchmark(step)
 
         if (_needs_val or _needs_bench) and ray_dataset_shard is not None:
             # ── Production path: full lifecycle teardown + rebuild ──────
@@ -589,11 +628,25 @@ def _run_epoch(
                     if rank == 0 and val_metrics:
                         logger.info(f"\033[1;32m[Validation @ Step {step}] {val_metrics}\033[0m")
                 if _needs_bench:
+                    # Runs AFTER validation, inside the same eval window.
+                    # cfg.evaluation.benchmarks.tasks (e.g. ["mmlu"]) executes
+                    # here via evaluator.run_benchmarks -> benchmark_runner.run_benchmarks.
                     bench_metrics = evaluator.run_benchmarks(tokenizer=None)
                     if tracker and bench_metrics:
                         tracker.log(bench_metrics, step=step)
                     if rank == 0 and bench_metrics:
                         logger.info(f"\033[1;34m[Benchmarks @ Step {step}] {bench_metrics}\033[0m")
+
+                # NOTE: checkpoint save deliberately does NOT happen here.
+                # This block runs inside `torch.inference_mode()` (see
+                # EvaluationLifecycle.run(): `with torch.inference_mode(): yield`).
+                # DCP's get_model_state_dict/get_optimizer_state_dict with
+                # StateDictOptions(cpu_offload=True) call `.to(cpu_device)`
+                # on DTensor shards, which under inference_mode dispatches
+                # through `aten.to.dtype_layout` — an overload DTensor's
+                # sharding propagator has no rule for, and raises
+                # NotImplementedError. The checkpoint is saved once, below,
+                # after this window has closed and inference_mode has exited.
 
             # After the context exits: model is back in train mode, optimizer
             # is back on GPU, and the iterator has been rebuilt at the cursor
@@ -618,10 +671,32 @@ def _run_epoch(
                     logger.info(f"\033[1;34m[Benchmarks @ Step {step}] {bench_metrics}\033[0m")
             ran_eval = True
 
-        # Clock protection: Reset throughput step timers if evaluations
-        # halted execution so the eval wall-time is not charged to the
-        # first training step after eval.
-        if ran_eval and throughput is not None:
+        # ── Checkpoint (single call site, at most once per step) ───────
+        # Runs here — after validation/benchmarks (if any) have finished
+        # and, on the lifecycle path, after torch.inference_mode() has
+        # exited — regardless of whether this step also ran an evaluation.
+        # _needs_ckpt was computed once, up front, so this is the only
+        # place a save can happen: no separate/duplicate save exists
+        # anywhere else in the loop for a checkpoint-due step.
+        if _needs_ckpt:
+            best_ckpts = _save_periodic_checkpoint(
+                model=model,
+                optimizer=optimizer,
+                ckpt_cfg=ckpt_cfg,
+                rank=rank,
+                best_ckpts=best_ckpts,
+                step=step,
+                epoch=epoch,
+                samples_consumed=_step_samples_consumed,
+                tokens_consumed=_step_tokens_consumed,
+                avg_loss=_avg_loss_for_ckpt,
+            )
+            _ckpt_done_this_step = True
+
+        # Clock protection: Reset throughput step timers if a checkpoint
+        # save and/or evaluation halted execution so that wall-time is not
+        # charged to the first training step after them.
+        if (ran_eval or _ckpt_done_this_step) and throughput is not None:
             throughput.reset_step_clock()
 
     if epoch_steps == 0:
