@@ -1,3 +1,4 @@
+# src/bhaskera/config.py
 """
 Bhaskera config — single source of truth.
 """
@@ -123,7 +124,9 @@ class DataConfig:
     tokenize_compression: str = "snappy"     # snappy | zstd | none
     prefetch_batches: int = 2
     local_shuffle_buffer_multiplier: int = 10
+
     pack_sequences: bool = False
+    train_on_inputs: Optional[bool] = None   # None=auto (True for CPT, False for SFT)
 
     # ── Phase 2: chat-format / local-files plumbing ────────────────────────
     format: Optional[str] = None
@@ -309,7 +312,6 @@ def _dict_to_config(raw: dict) -> Config:
             num_workers=int(data_raw.get("num_workers", 4)),
             is_cpt=bool(data_raw.get("is_cpt", False)),
 
-            # Phase 1
             tokenized_path=data_raw.get("tokenized_path"),
             cache_dir=data_raw.get("cache_dir"),
             overwrite_cache=bool(data_raw.get("overwrite_cache", False)),
@@ -320,8 +322,8 @@ def _dict_to_config(raw: dict) -> Config:
                 data_raw.get("local_shuffle_buffer_multiplier", 10)
             ),
             pack_sequences=bool(data_raw.get("pack_sequences", False)),
+            train_on_inputs=data_raw.get("train_on_inputs"),
 
-            # Phase 2
             format=data_raw.get("format"),
             format_options=dict(data_raw.get("format_options", {}) or {}),
             path=data_raw.get("path"),
@@ -460,7 +462,6 @@ def _dict_to_config(raw: dict) -> Config:
             ),
         ),
     )
-
 
 def load_config(path: str) -> Config:
     with open(path) as f:
