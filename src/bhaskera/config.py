@@ -1,4 +1,3 @@
-# src/bhaskera/config.py
 """
 Bhaskera config — single source of truth.
 """
