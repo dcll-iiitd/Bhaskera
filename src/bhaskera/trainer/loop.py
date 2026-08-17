@@ -426,18 +426,32 @@ def _run_epoch(
 
             with autocast_ctx:
                 # 2. DYNAMICALLY HANDLE SDPA vs FLASH ATTENTION 2
-                attn_impl = getattr(cfg.model, "attn_impl", "sdpa")
                 is_packed = seq_idx is not None and getattr(cfg.data, "pack_sequences", False)
 
                 if is_packed:
-                    if attn_impl == "flash_attention_2":
-                        # HF >= 4.43 handles sequence packing natively via flash_attn_varlen_func
-                        # IF position_ids properly reset to 0 (which ours do) and attention_mask is excluded.
-                        attention_mask = None
-                    else:
-                        # SDPA natively accepts the 4D block-diagonal mask
-                        from bhaskera.trainer.packing import build_4d_attention_mask
-                        attention_mask = build_4d_attention_mask(seq_idx, autocast_dtype)
+                    # NOTE: we deliberately do NOT special-case
+                    # attn_impl == "flash_attention_2" here by setting
+                    # attention_mask = None. That relies on the model's
+                    # internal FA2 path auto-deriving document boundaries
+                    # from position_ids resets (transformers'
+                    # _flash_attention_forward helper does this), but this
+                    # model is loaded with trust_remote_code=True — its
+                    # remote modeling code is not guaranteed to route
+                    # through that shared helper. If it doesn't, this fails
+                    # silently: no crash, just standard causal attention
+                    # across the whole packed row, i.e. documents bleed
+                    # into each other. So for every backend we build the
+                    # explicit 4D block-diagonal mask, which SDPA accepts
+                    # natively and which correctly isolates documents
+                    # regardless of what the remote code does internally.
+                    #
+                    # If FA2 + packing throughput matters, wire up
+                    # prepare_flash_attention_varlen (trainer/packing.py)
+                    # instead — but only after confirming the remote
+                    # model's forward() signature actually accepts
+                    # cu_seq_lens_q/cu_seq_lens_k/max_length_q/max_length_q.
+                    from bhaskera.trainer.packing import build_4d_attention_mask
+                    attention_mask = build_4d_attention_mask(seq_idx, autocast_dtype)
 
                 # 3. BUILD FORWARD KWARGS
                 forward_kwargs = dict(
