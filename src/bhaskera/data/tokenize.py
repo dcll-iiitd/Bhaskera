@@ -357,8 +357,16 @@ class TokenizerActor:
                 if not item: continue
                 if isinstance(item, list):
                     if self.train_on_inputs:
+                        # _apply_chat_template_safe renders the STRING form
+                        # of the chat template, which for many families
+                        # (Llama-style templates especially) already
+                        # contains the literal BOS token text. Re-encoding
+                        # with add_special_tokens=True would then prepend a
+                        # second BOS, so this must be False here (mirrors
+                        # the CPT branch above, which already gets this
+                        # right).
                         text = _apply_chat_template_safe(self.tokenizer, item)
-                        ids = self.tokenizer.encode(text, add_special_tokens=True)
+                        ids = self.tokenizer.encode(text, add_special_tokens=False)
                         lbls = list(ids)
                     else:
                         if has_template:
@@ -462,8 +470,12 @@ class TokenizerActor:
                 continue
             if isinstance(item, list):
                 if self.train_on_inputs:
+                    # See the matching comment in the multipack branch above:
+                    # the rendered template string can already embed a
+                    # literal BOS, so add_special_tokens must be False here
+                    # to avoid a duplicate leading BOS token.
                     text = _apply_chat_template_safe(self.tokenizer, item)
-                    ids = self.tokenizer.encode(text, add_special_tokens=True)
+                    ids = self.tokenizer.encode(text, add_special_tokens=False)
                     lbls = list(ids)
                 else:
                     if has_template:
@@ -487,6 +499,17 @@ class TokenizerActor:
 
             if not ids: continue
 
+            # Determine whether this conversation has any trainable
+            # (non -100) label *before* truncating to seq_len. A
+            # conversation that has real assistant content beyond the
+            # truncation boundary is still legitimate data -- it just
+            # loses its label supervision for this particular window --
+            # and should be kept as a real (if fully-masked) row, not
+            # silently dropped as if it never had an assistant turn at
+            # all (that case, e.g. test_conversation_without_assistant,
+            # is genuinely degenerate and should still be filtered out).
+            has_label = any(l != -100 for l in lbls)
+
             if len(ids) > self.seq_len:
                 ids = ids[:self.seq_len]
                 lbls = lbls[:self.seq_len]
@@ -505,7 +528,7 @@ class TokenizerActor:
             else:
                 att_mask = [1] * self.seq_len
 
-            if any(l != -100 for l in lbls):
+            if has_label:
                 batch_input_ids.append(ids)
                 batch_attention_mask.append(att_mask)
                 batch_labels.append(lbls)
@@ -611,7 +634,13 @@ def _apply_map_batches(
         concurrency=num_workers,
     )
 
-    if is_cpt or pack_sequences:
-        ds = ds.filter(lambda row: bool(np.sum(row["attention_mask"]) > 0))
+    # Any mode's TokenizerActor can emit an all--100-labels / all-zero
+    # attention_mask dummy row when a whole tokenize_batch_size-sized chunk
+    # produces no unmasked label anywhere (e.g. a run of conversations with
+    # no assistant turn) -- not just CPT/packed. If such a row reaches
+    # training, CrossEntropyLoss(reduction='mean') sees zero non-ignored
+    # tokens in that batch, i.e. a 0/0 -> NaN loss for that step. Filter it
+    # out unconditionally rather than only for is_cpt/pack_sequences.
+    ds = ds.filter(lambda row: bool(np.sum(row["attention_mask"]) > 0))
 
     return ds
