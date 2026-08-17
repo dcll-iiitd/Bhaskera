@@ -9,6 +9,10 @@ class MockTokenizer:
         self.pad_token_id = 99
         self.eos_token_id = 100
         self.chat_template = "mock"
+        self.pad_token = "<pad>"
+        self.eos_token = "<eos>"
+        self.bos_token_id = None
+        self.is_fast = False
 
     def encode(self, text, add_special_tokens=True):
         if add_special_tokens:
@@ -32,7 +36,7 @@ class MockTokenizer:
 
         if return_dict and return_assistant_tokens_mask:
             return {"input_ids": ids, "assistant_masks": mask}
-            
+
         return ids
 
 @patch("transformers.AutoTokenizer.from_pretrained", return_value=MockTokenizer())
@@ -118,7 +122,7 @@ def test_cpt_chunks_and_eos(mock_load):
 def test_sft_multipack_ffd_logic(mock_load):
     """Test that First-Fit Decreasing packing respects document boundaries and position IDs."""
     actor = TokenizerActor("mock-model", seq_len=8, format_name="chatml", pack_sequences=True, train_on_inputs=False)
-    
+
     # Document 1: 4 tokens -> 'u'+eos, 'a'+eos
     # Document 2: 2 tokens -> 'v'+eos (no assistant, all -100 label but still takes space)
     batch = {"messages": [
@@ -135,18 +139,18 @@ def test_sft_multipack_ffd_logic(mock_load):
 
     # They should both pack into the single 8-token sequence bucket, leaving 2 pad tokens
     assert out["input_ids"].shape == (1, 8)
-    
+
     # Expected Document 1: 'u'=117, eos=100, 'a'=97, eos=100
     # Expected Document 2: 'v'=118, eos=100
     # Pad = 99
     assert list(out["input_ids"][0]) == [117, 100, 97, 100, 118, 100, 99, 99]
-    
+
     # Doc 1 Assistant is index 2, 3. Rest are -100.
     assert list(out["labels"][0]) == [-100, -100, 97, 100, -100, -100, -100, -100]
-    
+
     # IMPORTANT: positions must reset for Document 2!
     assert list(out["position_ids"][0]) == [0, 1, 2, 3, 0, 1, 0, 0]
-    
+
     # IMPORTANT: Sequence index must increment for Document 2!
     assert list(out["seq_idx"][0]) == [1, 1, 1, 1, 2, 2, 0, 0]
 
@@ -155,6 +159,6 @@ def test_cache_invalidation():
     hash_sft_default = _cache_version_hash("falcon", 2048, "local", train_on_inputs=False, pack_sequences=False)
     hash_sft_packed  = _cache_version_hash("falcon", 2048, "local", train_on_inputs=False, pack_sequences=True)
     hash_cpt         = _cache_version_hash("falcon", 2048, "local", is_cpt=True)
-    
+
     assert hash_sft_default != hash_sft_packed
     assert hash_sft_packed != hash_cpt
