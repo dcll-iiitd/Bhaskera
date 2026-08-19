@@ -49,3 +49,6 @@ should summarize the change, list validation commands, link related issues, and 
 configuration or checkpoint compatibility. Include logs or screenshots for dashboard,
 metrics, or CLI-visible changes, and update documentation and example YAML when public
 behavior changes.
+
+# Branches
+- This repo has several branches that include the one for FL.
