@@ -138,7 +138,7 @@ def save_checkpoint(
 
     # Clean up any leftover .tmp from a prior interrupted save
     if rank == 0 and os.path.exists(tmp_path):
-        shutil.rmtree(tmp_path)
+        shutil.rmtree(tmp_path,ignore_errors=True)
         logger.warning(f"Removed incomplete checkpoint: {tmp_path}")
 
     if _is_rank_zero(rank):

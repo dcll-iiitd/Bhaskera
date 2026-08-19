@@ -112,7 +112,7 @@ class DataConfig:
     name: str = "ultrachat"
     seq_len: int = 2048
     num_workers: int = 4
-    
+
     is_cpt: bool = False  # Continual Pre-Training continuous packing flag
 
     # ── Phase 1: persistent-cache plumbing ─────────────────────────────────
@@ -123,7 +123,9 @@ class DataConfig:
     tokenize_compression: str = "snappy"     # snappy | zstd | none
     prefetch_batches: int = 2
     local_shuffle_buffer_multiplier: int = 10
+
     pack_sequences: bool = False
+    train_on_inputs: Optional[bool] = None   # None=auto (True for CPT, False for SFT)
 
     # ── Phase 2: chat-format / local-files plumbing ────────────────────────
     format: Optional[str] = None
@@ -174,7 +176,7 @@ class TrainingConfig:
     max_grad_norm: float = 1.0
     seed: int = 42
     deterministic: bool = False
-    
+
     grad_clip: Optional[float] = 1.0          # Phase 1: used by no_sync loop
     max_grad_skip_steps: int = 100
     distributed: DistributedConfig = field(default_factory=DistributedConfig)
@@ -186,6 +188,7 @@ class CheckpointConfig:
     enabled: bool = True
     save_dir: str = "./checkpoints"
     save_interval: int = 1
+    save_interval_unit: str = "epoch"
     keep_last_n: int = 2
 
 
@@ -287,7 +290,7 @@ def _dict_to_config(raw: dict) -> Config:
     prom_raw    = _get(raw, "monitoring", "prometheus", default={}) or {}
     graf_raw    = _get(raw, "monitoring", "grafana",    default={}) or {}
     metrics_raw = _get(raw, "monitoring", "metrics",    default={}) or {}
-    
+
     plugins_raw = _get(raw, "plugins", default={}) or {}
 
     return Config(
@@ -308,7 +311,6 @@ def _dict_to_config(raw: dict) -> Config:
             num_workers=int(data_raw.get("num_workers", 4)),
             is_cpt=bool(data_raw.get("is_cpt", False)),
 
-            # Phase 1
             tokenized_path=data_raw.get("tokenized_path"),
             cache_dir=data_raw.get("cache_dir"),
             overwrite_cache=bool(data_raw.get("overwrite_cache", False)),
@@ -319,8 +321,8 @@ def _dict_to_config(raw: dict) -> Config:
                 data_raw.get("local_shuffle_buffer_multiplier", 10)
             ),
             pack_sequences=bool(data_raw.get("pack_sequences", False)),
+            train_on_inputs=data_raw.get("train_on_inputs"),
 
-            # Phase 2
             format=data_raw.get("format"),
             format_options=dict(data_raw.get("format_options", {}) or {}),
             path=data_raw.get("path"),
@@ -391,6 +393,7 @@ def _dict_to_config(raw: dict) -> Config:
             enabled=bool(ckpt_raw.get("enabled", True)),
             save_dir=str(ckpt_raw.get("save_dir", "./checkpoints")),
             save_interval=int(ckpt_raw.get("save_interval", 1)),
+            save_interval_unit=str(ckpt_raw.get("save_interval_unit", "epoch")).lower(),
             keep_last_n=int(ckpt_raw.get("keep_last_n", 2)),
         ),
         logging=LoggingConfig(
@@ -458,7 +461,6 @@ def _dict_to_config(raw: dict) -> Config:
             ),
         ),
     )
-
 
 def load_config(path: str) -> Config:
     with open(path) as f:
