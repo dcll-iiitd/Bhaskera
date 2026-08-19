@@ -635,7 +635,7 @@ class EvaluationLifecycle:
                 "labels": torch.long,
                 "position_ids": torch.long,
                 "seq_idx": torch.long,
-            },
+            },        
         )
 
         # DataIterator has no .skip() — it is already a per-worker split,
@@ -987,5 +987,3 @@ class EvalTriggerPolicy:
 
     def should_run_any(self, step: int) -> bool:
         return self.should_run_validation(step) or self.should_run_benchmarks(step)
-
-

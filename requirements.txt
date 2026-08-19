@@ -44,3 +44,5 @@ mlflow>=2.10
 # --no-build-isolation. setup.sh installs it in a dedicated step after
 # torch is in place. If you are reproducing this environment manually,
 # run: MAX_JOBS=4 pip install flash-attn --no-build-isolation
+
+bitsandbytes>=0.43.0

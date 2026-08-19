@@ -210,7 +210,12 @@ Core runtime (from `pyproject.toml`):
 - `liger-kernel>=0.5`, `nvidia-ml-py>=12.535`
 - `omegaconf>=2.3.0`, `pyyaml>=6.0`, `numpy`, `pandas`, `psutil`, `tqdm`
 
-Optional extras: `wandb`, `mlflow`, `flash` (`flash-attn>=2.5`), `inference` (`scipy`), `dev` (`pytest`, `ruff`), `observability` (wandb + mlflow).
+Optional extras: `wandb`, `mlflow`, `flash` (`flash-attn>=2.5`), `inference` (`scipy`), `dev` (`pytest`, `ruff`).
+
+## License
+
+This project is licensed under the **Apache License 2.0** — see the [LICENSE](file:///mnt/disk1/slakshna/Bhaskera/LICENSE) file for details.
+
 
 Additional (install separately):
 - `bitsandbytes` — required for `model.quantization: qlora`.

@@ -116,12 +116,17 @@ def build_optimizer(model: torch.nn.Module, train_cfg) -> torch.optim.Optimizer:
 
 
 def build_scheduler(optimizer: torch.optim.Optimizer, train_cfg) -> LRScheduler:
-    """Linear warmup → cosine decay."""
+    if train_cfg.warmup_steps <= 0:
+        return CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, train_cfg.max_steps),
+        )
+
     warmup = LinearLR(
         optimizer,
         start_factor=1e-3,
         end_factor=1.0,
-        total_iters=max(1, train_cfg.warmup_steps),
+        total_iters=train_cfg.warmup_steps,
     )
     cosine = CosineAnnealingLR(
         optimizer,

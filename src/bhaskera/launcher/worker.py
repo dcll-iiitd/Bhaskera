@@ -26,10 +26,15 @@ logger = logging.getLogger(__name__)
 
 def worker_fn(cfg_dict: dict) -> None:
     """Entry point for a single GPU worker."""
+    try:
+        import setproctitle
+        setproctitle.setproctitle("RayTrainer")
+    except ImportError:
+        pass
+
     cfg = Config.from_dict(cfg_dict)
 
     load_plugins(cfg)
-
     ray_ctx    = ray.train.get_context()
     local_rank = ray_ctx.get_local_rank()
     rank       = ray_ctx.get_world_rank()

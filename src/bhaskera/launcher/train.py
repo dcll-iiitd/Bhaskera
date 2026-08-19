@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    try:
+        import setproctitle
+        setproctitle.setproctitle("RayTrainer")
+    except ImportError:
+        pass
     args = _parse_args()
     cfg  = load_config(args.config)
     

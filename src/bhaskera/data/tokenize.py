@@ -271,6 +271,19 @@ class TokenizerActor:
             if hasattr(texts_or_msgs, "tolist"):
                 texts_or_msgs = texts_or_msgs.tolist()
 
+        # Ray Data numpy conversion can yield arrays of structs instead of lists of dicts
+        _clean = []
+        for x in texts_or_msgs:
+            if hasattr(x, "tolist"):
+                x = x.tolist()
+            if isinstance(x, list) and len(x) > 0 and not isinstance(x[0], dict):
+                try:
+                    x = [dict(i) if not isinstance(i, dict) else i for i in x]
+                except Exception:
+                    pass
+            _clean.append(x)
+        texts_or_msgs = _clean
+
         has_template = hasattr(self.tokenizer, "apply_chat_template") and getattr(self.tokenizer, "chat_template", None)
         from bhaskera.data.formats.builtins import _manual_chatml_tokenize, _apply_chat_template_safe
 
@@ -484,7 +497,7 @@ class TokenizerActor:
                                 item, tokenize=True, return_dict=True, return_assistant_tokens_mask=True
                             )
                             ids = enc["input_ids"]
-                            if "assistant_masks" in enc:
+                            if "assistant_masks" in enc and any(enc["assistant_masks"]):
                                 lbls = [t if m else -100 for t, m in zip(ids, enc["assistant_masks"])]
                             else:
                                 ids, lbls = _manual_chatml_tokenize(self.tokenizer, item)

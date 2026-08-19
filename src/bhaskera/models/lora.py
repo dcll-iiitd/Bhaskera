@@ -48,6 +48,7 @@ DDP-parity fix (this revision):
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 import torch
@@ -104,7 +105,40 @@ def apply_lora(model: nn.Module, cfg, profile: ModelProfile) -> nn.Module:
         peft_kwargs["modules_to_save"] = list(modules_to_save)
 
     lora_cfg = PeftLoraConfig(**peft_kwargs)
+    
+    resume_path = getattr(cfg.lora, "resume_path", None)
     model = get_peft_model(model, lora_cfg)
+    if resume_path and os.path.exists(resume_path):
+        logger.info(f"Loading existing LoRA weights from {resume_path}")
+        sd = torch.load(resume_path, map_location="cpu", weights_only=True)
+        # Cast to fp32 to match PEFT's default LoRA dtype for DDP
+        sd = {k: v.float() for k, v in sd.items()}
+        # Try PEFT's helper first (expects base_model.model.* keys)
+        try:
+            from peft import set_peft_model_state_dict
+            result = set_peft_model_state_dict(model, sd)
+            if result.missing_keys:
+                logger.warning(f"set_peft_model_state_dict: {len(result.missing_keys)} missing keys, trying direct load")
+                raise ValueError("missing keys")
+            logger.info(f"Loaded {len(sd)} LoRA tensors via set_peft_model_state_dict")
+        except Exception as e:
+            # Fallback: directly copy matching parameters by name
+            # Handle both key formats: with and without adapter name (e.g., lora_A.weight vs lora_A.default.weight)
+            logger.warning(f"set_peft_model_state_dict failed ({e}), falling back to direct param copy")
+            import re as _re
+            matched = 0
+            for name, param in model.named_parameters():
+                # Try direct match first
+                if name in sd and param.shape == sd[name].shape:
+                    param.data.copy_(sd[name].to(param.device))
+                    matched += 1
+                else:
+                    # Try the normalized key (strip adapter name from param key)
+                    norm_name = _re.sub(r'(lora_[AB])\.[^.]+\.(weight)', r'\1.\2', name)
+                    if norm_name in sd and param.shape == sd[norm_name].shape:
+                        param.data.copy_(sd[norm_name].to(param.device))
+                        matched += 1
+            logger.info(f"Direct param copy: matched {matched}/{len(sd)} tensors")
 
     # ── Strategy-gated LoRA dtype cast ──────────────────────────────
     # FSDP2 path: cast LoRA (the only trainable) params to base dtype
