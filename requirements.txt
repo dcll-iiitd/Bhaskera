@@ -13,6 +13,7 @@ pandas>=2.0
 peft>=0.10
 psutil>=5.9
 pyyaml>=6.0
+bitsandbytes>=0.43.0
 
 # Ray Train + Data + Default (the 'default' extra pulls in the
 # dashboard, the metrics agent, and prometheus_client — required for
@@ -45,4 +46,3 @@ mlflow>=2.10
 # torch is in place. If you are reproducing this environment manually,
 # run: MAX_JOBS=4 pip install flash-attn --no-build-isolation
 
-bitsandbytes>=0.43.0
