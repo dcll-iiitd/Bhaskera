@@ -1,0 +1,60 @@
+model:
+  name: "allenai/OLMo-2-1124-7B-Instruct"
+  dtype: "bfloat16"
+  attn_impl: "flash_attention_2"
+  trust_remote_code: false
+
+data:
+  name: "ultrachat"
+  seq_len: 2048
+  num_workers: 8
+  tokenized_path: "/mnt/disk1/slakshna/training/Bhaskera/cache/ultrachat_be4f8f3cb4791489"
+
+lora:
+  enabled: true
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["auto"]
+  include_experts: false
+  freeze_router: true
+  modules_to_save: []
+
+training:
+  batch_size: 1
+  grad_accum: 8
+  lr: 2.0e-4
+  weight_decay: 0.01
+  max_steps: 100
+  num_epochs: 1
+  warmup_steps: 10
+  max_grad_norm: 1.0
+  seed: 42
+  deterministic: false
+
+  distributed:
+    strategy: "fsdp"
+    fsdp:
+      sharding_strategy: "FULL_SHARD"
+      transformer_layer_cls: []
+      param_dtype: "bfloat16"
+      reduce_dtype: "bfloat16"
+      buffer_dtype: "bfloat16"
+      activation_checkpointing: true
+      cpu_offload: false
+      shard_experts_individually: false
+
+checkpoint:
+  enabled: true
+  save_dir: "/mnt/disk1/slakshna/training/Bhaskera/checkpoints/olmo2"
+  save_interval: 1
+  keep_last_n: 2
+
+logging:
+  tracker: "wandb"
+  project: "bhaskera-olmo2"
+  run_name: "olmo2-7b-instruct-lora"
+  log_gpu_every_n_steps: 10
+
+monitoring:
+  dashboard_port: 18265

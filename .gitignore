@@ -10,7 +10,7 @@ build/
 
 # Checkpoints / model outputs
 checkpoints/
-
+cache/
 # Env
 .venv/
 env/

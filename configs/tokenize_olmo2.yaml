@@ -1,0 +1,13 @@
+model:
+  name: "allenai/OLMo-2-1124-7B-Instruct"
+  trust_remote_code: false
+
+data:
+  name: "ultrachat"
+  seq_len: 2048
+  cache_dir: "/mnt/disk1/slakshna/training/Bhaskera/cache"
+  
+  num_workers: 8
+  tokenize_batch_size: 32
+  tokenize_compression: "snappy"
+  prefetch_batches: 2
