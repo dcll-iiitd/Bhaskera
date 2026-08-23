@@ -1775,6 +1775,34 @@ class Muon4bitNVFP4(MuonBase):
         )
 
 from bhaskera.trainer.optimizer_registry import register_optimizer
+from torch.optim import AdamW
+import torch
+
+class HybridMuonAdamW(torch.optim.Optimizer):
+    def __init__(self, muon_opt: torch.optim.Optimizer, adamw_opt: torch.optim.Optimizer):
+        self.muon_opt = muon_opt
+        self.adamw_opt = adamw_opt
+        
+        merged_groups = muon_opt.param_groups + adamw_opt.param_groups
+        super().__init__(merged_groups, {})
+        
+        # Force all optimizers to use the same shared state dictionary
+        # so PyTorch DCP (Distributed Checkpoint) correctly shards everything!
+        self.muon_opt.state = self.state
+        self.adamw_opt.state = self.state
+
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        self.muon_opt.step()
+        self.adamw_opt.step()
+        return loss
+
+    def zero_grad(self, set_to_none=True):
+        self.muon_opt.zero_grad(set_to_none=set_to_none)
+        self.adamw_opt.zero_grad(set_to_none=set_to_none)
 
 @register_optimizer("muon")
 def build_muon(model, train_cfg):
@@ -1799,8 +1827,13 @@ def build_muon(model, train_cfg):
     
     param_groups = _get_default_param_groups(model, weight_decay)
     
-    return Muon(
-        param_groups,
+    # Group 0 contains all 2D+ tensors (Weights) -> Muon
+    decay_group = [param_groups[0]]
+    # Group 1 contains all 1D tensors (Biases, LayerNorms) -> AdamW
+    no_decay_group = [param_groups[1]]
+    
+    muon_opt = Muon(
+        decay_group,
         lr=lr,
         momentum=momentum,
         weight_decay=weight_decay,
@@ -1811,3 +1844,12 @@ def build_muon(model, train_cfg):
         min_8bit_size=min_8bit_size,
         quant_type=quant_type
     )
+    
+    adamw_opt = AdamW(
+        no_decay_group,
+        lr=lr,
+        betas=(0.9, 0.95),
+        fused=torch.cuda.is_available()
+    )
+    
+    return HybridMuonAdamW(muon_opt, adamw_opt)
