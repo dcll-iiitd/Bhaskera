@@ -1,3 +1,7 @@
+plugins:
+  optimizers:
+    - "bhaskera.plugins.optimizers.muon"
+
 model:
   name: "allenai/OLMo-2-1124-7B-Instruct"
   dtype: "bfloat16"
@@ -9,11 +13,13 @@ data:
   format: "chatml"
   train_path: "/mnt/disk1/slakshna/training/Bhaskera/dataset/South_Asia.jsonl"
   seq_len: 2048
-  num_workers: 8
+  num_workers: 4
+  tokenized_path: "/mnt/disk1/slakshna/training/Bhaskera/cache/local_train_e5a7a539a76181d0"
+  overwrite_cache: false
 
 lora:
   enabled: true
-  r: 16
+  r: 256
   alpha: 32
   dropout: 0.05
   target_modules: ["auto"]
@@ -24,7 +30,7 @@ lora:
 training:
   batch_size: 1
   grad_accum: 8
-  lr: 2.0e-4
+  lr: 2.0e-5
   weight_decay: 0.01
   max_steps: 100
   num_epochs: 1
@@ -32,6 +38,16 @@ training:
   max_grad_norm: 1.0
   seed: 42
   deterministic: false
+
+  optimizer:
+    backend: "plugin"
+    name: "muon"
+    kwargs:
+      lr: 2.0e-5
+      momentum: 0.95
+      weight_decay: 0.01
+      optim_bits: 8
+      adjust_lr: null
 
   distributed:
     strategy: "fsdp"
@@ -54,7 +70,7 @@ checkpoint:
 logging:
   tracker: "wandb"
   project: "bhaskera-olmo2"
-  run_name: "olmo2-7b-instruct-south-asia"
+  run_name: "Muon-olmo2-7b-instruct-south-asia"
   log_gpu_every_n_steps: 10
 
 monitoring:
