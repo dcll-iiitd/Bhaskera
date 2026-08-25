@@ -11,6 +11,7 @@ Scenario-specific YAML files live in `configs/`; SLURM launch support is in
 Read the relevant package README and `ARCHITECTURE.md` before changing subsystem
 contracts.
 
+
 ## Build, Test, and Development Commands
 
 - `bash setup.sh`: detect CUDA, create the environment, and install Bhaskera.
