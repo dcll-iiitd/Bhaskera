@@ -29,6 +29,7 @@ dependencies = [
     "nvidia-ml-py>=12.535",
     # Triton-fused RMSNorm / RoPE / SwiGLU / CrossEntropy kernels.
     "liger-kernel>=0.5",
+    "bitsandbytes>=0.43.0",
 ]
 
 [project.optional-dependencies]
