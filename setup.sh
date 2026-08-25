@@ -5,7 +5,6 @@
 #
 # Usage:
 #   bash setup.sh
-#
 # Optional overrides:
 #   BHASKERA_CUDA=12.4   bash setup.sh
 #   BHASKERA_VENV=/path  bash setup.sh
