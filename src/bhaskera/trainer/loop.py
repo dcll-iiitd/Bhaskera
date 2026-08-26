@@ -143,6 +143,12 @@ def train(
         step, _resume_meta = maybe_resume(model, optimizer, ckpt_cfg.save_dir)
         model.train()
 
+    # FedProx: Snapshot the global weights at the start of training if enabled
+    fedprox_enabled = getattr(cfg.federated, "fedprox", False) if hasattr(cfg, "federated") else False
+    global_weights = None
+    if fedprox_enabled:
+        global_weights = {name: param.clone().detach().to(device) for name, param in model.named_parameters() if param.requires_grad}
+
     # Restore dataset cursor from checkpoint so the iterator can be
     # fast-forwarded to the exact position the run was interrupted at.
     _resume_cursor = cursor_from_checkpoint_metadata(_resume_meta)
@@ -201,6 +207,7 @@ def train(
             ray_dataset_shard=ray_dataset_shard,
             samples_consumed=_samples_consumed,
             tokens_consumed=_tokens_consumed,
+            global_weights=global_weights,
         )
         # After each epoch the position resets to 0 (new epoch starts from
         # the beginning of the dataset). The cursor from a checkpoint only
@@ -242,6 +249,7 @@ def _run_epoch(
     ray_dataset_shard=None,
     samples_consumed: int = 0,
     tokens_consumed: int = 0,
+    global_weights: Optional[dict] = None,
 ):
     train_cfg = cfg.training
     ckpt_cfg = cfg.checkpoint
@@ -442,6 +450,15 @@ def _run_epoch(
             break
 
         _set_grad_sync(model, enabled=True)
+
+        # ── FedProx ─────────────────────────────────────────────────
+        if global_weights is not None:
+            fedprox_lambda = getattr(cfg.federated, "fedprox_lambda", 0.5) if hasattr(cfg, "federated") else 0.5
+            if fedprox_lambda > 0.0:
+                with torch.no_grad():
+                    for name, param in model.named_parameters():
+                        if param.requires_grad and param.grad is not None and name in global_weights:
+                            param.grad.add_(param.data - global_weights[name], alpha=fedprox_lambda)
 
         # ── Optimizer step ──────────────────────────────────────────
         grad_clip = getattr(train_cfg, "grad_clip", None) or getattr(train_cfg, "max_grad_norm", 1.0)
