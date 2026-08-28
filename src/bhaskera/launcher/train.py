@@ -43,6 +43,11 @@ def main() -> None:
     if args.dashboard_port:
         cfg.monitoring.dashboard_port = args.dashboard_port
 
+    if args.resume_samples:
+        cfg.training.resume_samples = args.resume_samples
+    if args.resume_tokens:
+        cfg.training.resume_tokens = args.resume_tokens
+
     monitoring = setup_monitoring(cfg)
 
     _init_ray(monitoring)
@@ -145,6 +150,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--storage-path",   type=str, default=None, help="Ray Train storage path")
     p.add_argument("--no-dashboard",   action="store_true",    help="Disable Ray Dashboard")
     p.add_argument("--dashboard-port", type=int, default=None, help="Ray Dashboard port")
+    p.add_argument("--resume-samples", type=int, default=0,    help="Samples consumed so far")
+    p.add_argument("--resume-tokens",  type=int, default=0,    help="Tokens consumed so far")
     return p.parse_args()
 
 

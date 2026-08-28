@@ -146,8 +146,10 @@ def train(
     # Restore dataset cursor from checkpoint so the iterator can be
     # fast-forwarded to the exact position the run was interrupted at.
     _resume_cursor = cursor_from_checkpoint_metadata(_resume_meta)
-    _samples_consumed: int = _resume_cursor.samples_consumed
-    _tokens_consumed: int  = _resume_cursor.tokens_consumed
+    
+    _samples_consumed: int = getattr(train_cfg, "resume_samples", None) or _resume_cursor.samples_consumed
+    _tokens_consumed: int  = getattr(train_cfg, "resume_tokens", None) or _resume_cursor.tokens_consumed
+    loader_iter = None
 
     best_ckpts: list[tuple[float, str]] = []
 
@@ -180,7 +182,7 @@ def train(
         }, step=0)
 
     for epoch in range(train_cfg.num_epochs):
-        step, best_ckpts, _samples_consumed, _tokens_consumed = _run_epoch(
+        step, best_ckpts, _samples_consumed, _tokens_consumed, loader_iter = _run_epoch(
             model=model,
             dataset=dataset,
             val_dataset=val_dataset,
@@ -201,12 +203,8 @@ def train(
             ray_dataset_shard=ray_dataset_shard,
             samples_consumed=_samples_consumed,
             tokens_consumed=_tokens_consumed,
+            loader_iter=loader_iter,
         )
-        # After each epoch the position resets to 0 (new epoch starts from
-        # the beginning of the dataset). The cursor from a checkpoint only
-        # applies to the first epoch after resume.
-        _samples_consumed = 0
-        _tokens_consumed  = 0
         if step >= train_cfg.max_steps:
             break
 
@@ -242,6 +240,7 @@ def _run_epoch(
     ray_dataset_shard=None,
     samples_consumed: int = 0,
     tokens_consumed: int = 0,
+    loader_iter = None,
 ):
     train_cfg = cfg.training
     ckpt_cfg = cfg.checkpoint
@@ -288,7 +287,9 @@ def _run_epoch(
         device=device,
     )
 
-    if samples_consumed > 0 and ray_dataset_shard is not None:
+    if loader_iter is not None:
+        loader = None
+    elif samples_consumed > 0 and ray_dataset_shard is not None:
         if rank == 0:
             logger.info(
                 f"[loop] Checkpoint resume: skipping {samples_consumed} "
@@ -439,6 +440,9 @@ def _run_epoch(
                 micro_aux_losses.append(aux_loss.detach())
 
         if loader_iter is None:
+            # Dataset is exhausted. Reset counters so the next epoch (if any) starts fresh from 0.
+            _step_samples_consumed = 0
+            _step_tokens_consumed = 0
             break
 
         _set_grad_sync(model, enabled=True)
@@ -520,7 +524,8 @@ def _run_epoch(
         if rank == 0:
             msg = (
                 f"[epoch {epoch}][step {step}] loss={window_loss:.4f} "
-                f"lr={lr:.2e} grad_norm={grad_norm:.4f}"
+                f"lr={lr:.2e} grad_norm={grad_norm:.4f} "
+                f"samples={_step_samples_consumed} tokens={_step_tokens_consumed}"
             )
             if "throughput/tokens_per_sec_global" in throughput_metrics:
                 msg += f" tok/s={throughput_metrics['throughput/tokens_per_sec_global']:.0f}"
@@ -535,6 +540,8 @@ def _run_epoch(
             "epoch": float(epoch),
             "loss_running_avg": loss_ema,
             "loss_spike_ratio": loss_spike,
+            "samples_consumed": float(_step_samples_consumed),
+            "tokens_consumed": float(_step_tokens_consumed),
         }
         if profile.is_moe:
             metrics["aux_loss"] = window_aux
@@ -642,7 +649,7 @@ def _run_epoch(
             throughput.reset_step_clock()
 
     if epoch_steps == 0:
-        return step, best_ckpts, _step_samples_consumed, _step_tokens_consumed
+        return step, best_ckpts, _step_samples_consumed, _step_tokens_consumed, loader_iter
 
     avg_loss = epoch_loss / epoch_steps
     epoch_msg = f"[epoch {epoch}] avg_loss={avg_loss:.4f}"
@@ -677,4 +684,4 @@ def _run_epoch(
             cursor_meta=cursor_to_checkpoint_metadata(_ckpt_cursor),
         )
 
-    return step, best_ckpts, _step_samples_consumed, _step_tokens_consumed
+    return step, best_ckpts, _step_samples_consumed, _step_tokens_consumed, loader_iter

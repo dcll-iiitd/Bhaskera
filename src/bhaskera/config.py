@@ -175,6 +175,8 @@ class TrainingConfig:
     max_grad_norm: float = 1.0
     seed: int = 42
     deterministic: bool = False
+    resume_samples: int = 0
+    resume_tokens: int = 0
     
     grad_clip: Optional[float] = 1.0          # Phase 1: used by no_sync loop
     max_grad_skip_steps: int = 100
@@ -358,6 +360,8 @@ def _dict_to_config(raw: dict) -> Config:
             max_grad_norm=float(train_raw.get("max_grad_norm", 1.0)),
             seed=int(train_raw.get("seed", 42)),
             deterministic=bool(train_raw.get("deterministic", False)),
+            resume_samples=int(train_raw.get("resume_samples", 0)),
+            resume_tokens=int(train_raw.get("resume_tokens", 0)),
             grad_clip=train_raw.get("grad_clip", 1.0),
             max_grad_skip_steps=int(train_raw.get("max_grad_skip_steps", 100)),
             optimizer=OptimizerConfig(
