@@ -441,8 +441,19 @@ def _run_epoch(
 
         if loader_iter is None:
             # Dataset is exhausted. Reset counters so the next epoch (if any) starts fresh from 0.
+            # Explicitly add a row with `samples=0 tokens=0` here. This serves as a 
+            # signal for the external orchestrator to know that this round finished purely 
+            # due to dataset exhaustion, avoiding parsing errors or stale sample values on the next run.
             _step_samples_consumed = 0
             _step_tokens_consumed = 0
+            if rank == 0:
+                _dl = loss_ema if loss_ema is not None else 0.0
+                _lr = scheduler.get_last_lr()[0] if scheduler else 0.0
+                logger.info(
+                    f"[epoch {epoch}][step {step}] loss={_dl:.4f} "
+                    f"lr={_lr:.2e} grad_norm=0.0000 "
+                    f"samples=0 tokens=0"
+                )
             break
 
         _set_grad_sync(model, enabled=True)

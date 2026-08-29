@@ -86,12 +86,14 @@ def _cleanup_old_checkpoints(save_dir: str, keep_last_n: int) -> None:
     """Remove all but the most recent keep_last_n completed checkpoints."""
     if keep_last_n <= 0:
         return
+    # Sort candidate checkpoint directories by their `.complete` file modification time. When the step counter resets 
+    # to 0 after dataset exhaustion, pre-reset checkpoint as the latest, causing the pruning logic to accidentally delete newly created checkpoints.
     candidates = sorted([
         p for p in Path(save_dir).iterdir()
         if p.is_dir()
         and _STEP_RE.search(p.name)
         and (p / ".complete").exists()
-    ], key=lambda p: int(_STEP_RE.search(p.name).group(1)))
+    ], key=lambda p: os.path.getmtime(p / ".complete"))
     for old in candidates[:-keep_last_n]:
         shutil.rmtree(str(old), ignore_errors=True)
         logger.info(f"Pruned old checkpoint: {old}")
@@ -226,12 +228,15 @@ def maybe_resume(
         logger.info("No checkpoint directory found. Starting from step 0.")
         return 0, {}
 
+    # Similar to pruning, we sort by `.complete` modification time rather than step number.
+    # preventing the trainer from resuming from a stale, pre-reset checkpoint (e.g., step 50) 
+    # when a newer, post-reset checkpoint (e.g., step 23) exists.
     candidates = sorted([
         p for p in Path(save_dir).iterdir()
         if p.is_dir()
         and _STEP_RE.search(p.name)
         and (p / ".complete").exists()      # skip partially-written checkpoints
-    ], key=lambda p: int(_STEP_RE.search(p.name).group(1)))
+    ], key=lambda p: os.path.getmtime(p / ".complete"))
 
     if not candidates:
         logger.info("No valid checkpoints found (missing .complete sentinel). Starting from step 0.")
