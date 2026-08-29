@@ -8,7 +8,8 @@ data:
   train_path: "/mnt/disk1/slakshna/training/Bhaskera/dataset/South_Asia.jsonl"
   seq_len: 2048
   cache_dir: "/mnt/disk1/slakshna/training/Bhaskera/cache"
-  
+  pack_sequences: True
+  overwrite_cache: true 
   num_workers: 8
   tokenize_batch_size: 32
   tokenize_compression: "snappy"

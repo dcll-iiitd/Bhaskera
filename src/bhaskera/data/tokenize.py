@@ -308,7 +308,7 @@ class TokenizerActor:
                                     item, tokenize=True, return_dict=True, return_assistant_tokens_mask=True
                                 )
                                 ids = enc["input_ids"]
-                                if "assistant_masks" in enc:
+                                if "assistant_masks" in enc and any(enc["assistant_masks"]):
                                     lbls = [t if m else -100 for t, m in zip(ids, enc["assistant_masks"])]
                                 else:
                                     ids, lbls = _manual_chatml_tokenize(self.tokenizer, item)
@@ -388,7 +388,7 @@ class TokenizerActor:
                                     item, tokenize=True, return_dict=True, return_assistant_tokens_mask=True
                                 )
                                 ids = enc["input_ids"]
-                                if "assistant_masks" in enc:
+                                if "assistant_masks" in enc and any(enc["assistant_masks"]):
                                     lbls = [t if m else -100 for t, m in zip(ids, enc["assistant_masks"])]
                                 else:
                                     ids, lbls = _manual_chatml_tokenize(self.tokenizer, item)

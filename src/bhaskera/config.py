@@ -351,7 +351,7 @@ def _dict_to_config(raw: dict) -> Config:
         ),
         training=TrainingConfig(
             batch_size=int(train_raw.get("batch_size", 2)),
-            grad_accum=int(train_raw.get("grad_accum", 4)),
+            grad_accum=int(train_raw.get("grad_accum", train_raw.get("gradient_accumulation_steps", 4))),
             lr=float(train_raw.get("lr", 2e-4)),
             weight_decay=float(train_raw.get("weight_decay", 0.01)),
             max_steps=int(train_raw.get("max_steps", 1000)),

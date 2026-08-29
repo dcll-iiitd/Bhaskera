@@ -13,28 +13,32 @@ data:
   format: "chatml"
   train_path: "/mnt/disk1/slakshna/training/Bhaskera/dataset/South_Asia.jsonl"
   seq_len: 2048
-  num_workers: 4
-  tokenized_path: "/mnt/disk1/slakshna/training/Bhaskera/cache/local_train_e5a7a539a76181d0"
+  num_workers: 8
+  tokenized_path: "/mnt/disk1/slakshna/training/Bhaskera/cache/local_train_079a0daaff30bc4e" # /mnt/disk1/slakshna/training/Bhaskera/cache/local_train_079a0daaff30bc4e
   overwrite_cache: false
+  pack_sequences: True
+  tokenize_compression: "snappy"
+  tokenize_batch_size: 256
+
 
 lora:
   enabled: true
-  r: 256
-  alpha: 32
-  dropout: 0.05
+  r: 16
+  alpha: 64
+  dropout: 0.03
   target_modules: ["auto"]
   include_experts: false
   freeze_router: true
   modules_to_save: []
 
 training:
-  batch_size: 1
+  batch_size: 4
   grad_accum: 8
-  lr: 2.0e-5
+  lr: 3.0e-4
   weight_decay: 0.01
-  max_steps: 100
-  num_epochs: 1
-  warmup_steps: 10
+  max_steps: 50
+  num_epochs: 10
+  warmup_steps: 5
   max_grad_norm: 1.0
   seed: 42
   deterministic: false
@@ -43,11 +47,10 @@ training:
     backend: "plugin"
     name: "muon"
     kwargs:
-      lr: 2.0e-5
+      lr: 3.0e-4
       momentum: 0.95
       weight_decay: 0.01
       optim_bits: 8
-      adjust_lr: null
 
   distributed:
     strategy: "fsdp"
@@ -69,8 +72,8 @@ checkpoint:
 
 logging:
   tracker: "wandb"
-  project: "bhaskera-olmo2"
-  run_name: "Muon-olmo2-7b-instruct-south-asia"
+  project: "after-pack_seq"
+  run_name: "with_correct_token_path"
   log_gpu_every_n_steps: 10
 
 monitoring:
