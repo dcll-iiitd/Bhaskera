@@ -58,13 +58,13 @@ The script writes `bhaskera-activate.sh` to the project root — source this at 
 
 Declared in `pyproject.toml` under `[project.scripts]`:
 
-| Command | Module | Purpose |
-|---|---|---|
-| `bhaskera-train` | `bhaskera.launcher.train` | Ray Train driver — submits `TorchTrainer` with `worker_fn` per GPU |
-| `bhaskera-tokenize` | `bhaskera.launcher.tokenize` | Tokenise a dataset once and persist to Parquet cache |
-| `bhaskera-infer` | `bhaskera.launcher.infer` | Single-prompt or batch generation from a checkpoint |
-| `bhaskera-diag` | `bhaskera.launcher.diagnostics` | NCCL all-reduce + bandwidth check |
-| `bhaskera-dashboard` | `bhaskera.launcher.dashboard` | Start / stop the MLflow UI on the login node |
+| Command              | Module                          | Purpose                                                            |
+| -------------------- | ------------------------------- | ------------------------------------------------------------------ |
+| `bhaskera-train`     | `bhaskera.launcher.train`       | Ray Train driver — submits `TorchTrainer` with `worker_fn` per GPU |
+| `bhaskera-tokenize`  | `bhaskera.launcher.tokenize`    | Tokenise a dataset once and persist to Parquet cache               |
+| `bhaskera-infer`     | `bhaskera.launcher.infer`       | Single-prompt or batch generation from a checkpoint                |
+| `bhaskera-diag`      | `bhaskera.launcher.diagnostics` | NCCL all-reduce + bandwidth check                                  |
+| `bhaskera-dashboard` | `bhaskera.launcher.dashboard`   | Start / stop the MLflow UI on the login node                       |
 
 ## Configuration
 
