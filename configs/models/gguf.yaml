@@ -1,0 +1,37 @@
+# Pinned GGUF checkpoints for the decision backend (serve.backend: decision).
+# A serve config names one as model.gguf: "<name>-<quant>" (e.g. jevos-q8_0), or gives a
+# path to a .gguf file instead. Files download to serve.decision.models_dir/<name>/<file>
+# and are verified against sha256 before use.
+models:
+  jevos:
+    source: feder-cr/jev release "jevos"
+    repo: feder-cr/jev
+    revision: jevos
+    license: see https://github.com/feder-cr/jev
+    architecture: llama
+    base_url: https://github.com/feder-cr/jev/releases/download/jevos
+    files:
+      q8_0:
+        file: jevos-q8_0.gguf
+        sha256: 7027cf624c518122b3b0913f67a32ebb98a0ca7cfc662f0901a0260cf06ae540
+        bytes: 942872192
+      q4_k_m:
+        file: jevos-q4_k_m.gguf
+        sha256: 677d126a67d48a6ae965ce80973e7e68c7ab0b13b590a557d8f0cc29a178499f
+        bytes: 619289216
+  gemma-4-e4b:
+    source: google/gemma-4-E4B-it
+    repo: bartowski/google_gemma-4-E4B-it-GGUF
+    revision: 029e94146666900b08caf49a3b47b413dfa8ec66
+    license: apache-2.0
+    architecture: null
+    base_url: https://huggingface.co/bartowski/google_gemma-4-E4B-it-GGUF/resolve/029e94146666900b08caf49a3b47b413dfa8ec66
+    files:
+      q8_0:
+        file: google_gemma-4-E4B-it-Q8_0.gguf
+        sha256: 6a6eba0d36a051b5d924211a889c1436717006e7c5d413830c47caa1d46cb598
+        bytes: 8031242720
+      q4_k_m:
+        file: google_gemma-4-E4B-it-Q4_K_M.gguf
+        sha256: d35a3aa7a6d47de237fd488bb6f7f3efd62908d828f85a63da0ee93acdbefe9f
+        bytes: 5405170144
