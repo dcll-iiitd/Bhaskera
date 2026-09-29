@@ -69,9 +69,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--backend",
-        choices=["vllm", "hf"],
+        choices=["vllm", "hf", "decision"],
         default=None,
         help="Override cfg.serve.backend.",
+    )
+    p.add_argument(
+        "--gguf",
+        default=None,
+        metavar="SPEC",
+        help="Override cfg.model.gguf (decision backend): registry name or .gguf path.",
     )
     p.add_argument(
         "--num-replicas",
@@ -125,6 +131,8 @@ def main(argv: list[str] | None = None) -> None:
         cfg.serve.backend = args.backend
     if args.num_replicas is not None:
         cfg.serve.num_replicas = args.num_replicas
+    if args.gguf is not None:
+        cfg.model.gguf = args.gguf
 
     if cfg.serve.port == 0:
         cfg.serve.port = get_free_port()
@@ -135,18 +143,27 @@ def main(argv: list[str] | None = None) -> None:
 
     _log_startup_banner(cfg)
 
-    if cfg.serve.backend not in ("vllm", "hf"):
+    if cfg.serve.backend not in ("vllm", "hf", "decision"):
         logger.error(
-            "cfg.serve.backend must be 'vllm' or 'hf', got %r",
+            "cfg.serve.backend must be 'vllm', 'hf' or 'decision', got %r",
             cfg.serve.backend,
         )
         sys.exit(1)
 
+    if cfg.serve.backend == "decision":
+        # Download/verify weights and the pinned llama.cpp runtime once, here on the
+        # driver, so replicas never race on downloads and only see absolute paths.
+        from bhaskera.serve.decision.loader import provision
+
+        logger.info("Provisioning decision model %s …", cfg.model.gguf)
+        provision(cfg)
+        logger.info("  gguf=%s runtime=%s", cfg.model.gguf, cfg.serve.decision.llama_cpp.runtime_dir)
+
     import ray
 
-    ray_address: str | None = (
-        None if args.ray_address == "local" else args.ray_address
-    )
+    # "local" is passed through: ray.init(address="local") always starts a new cluster,
+    # never attaching to someone else's on a shared host.
+    ray_address: str = args.ray_address
 
     logger.info(
         "Initialising Ray | address=%s",

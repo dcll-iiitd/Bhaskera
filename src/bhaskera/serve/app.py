@@ -38,6 +38,23 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def decision_options(cfg: "Config") -> dict:
+    """
+    Replica options of the decision backend.  Every replica holds one llama.cpp
+    context; ``num_gpus: auto`` splits one GPU evenly between the replicas.
+    ``max_ongoing_requests`` keeps queueing in Ray's router (which balances
+    replicas) rather than behind a replica's engine lock.
+    """
+    actor = dict(cfg.serve.ray_actor_options)
+    if actor.get("num_gpus") == "auto":
+        actor["num_gpus"] = 1 / cfg.serve.num_replicas
+    return {
+        "num_replicas": cfg.serve.num_replicas,
+        "ray_actor_options": actor,
+        "max_ongoing_requests": cfg.serve.decision.max_ongoing_requests,
+    }
+
+
 def build_app(cfg: "Config"):
     """
     Construct and return a Ray Serve application bound to ``cfg``.
@@ -57,9 +74,21 @@ def build_app(cfg: "Config"):
     ray.serve.Application
         Bound deployment handle ready for ``serve.run()``.
     """
+    backend  = cfg.serve.backend.lower()
+
+    if backend == "decision":
+        from .decision_deployment import DecisionDeployment
+
+        options = decision_options(cfg)
+        logger.info(
+            "build_app | backend=decision replicas=%d actor_opts=%s max_ongoing=%d",
+            options["num_replicas"], options["ray_actor_options"],
+            options["max_ongoing_requests"],
+        )
+        return DecisionDeployment.options(**options).bind(cfg)
+
     from .deployment import LLMDeployment
 
-    backend  = cfg.serve.backend.lower()
     is_hf    = backend == "hf"
     is_vllm  = backend == "vllm"
 
