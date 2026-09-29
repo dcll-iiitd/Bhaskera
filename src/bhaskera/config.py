@@ -13,6 +13,7 @@ class ModelConfig:
     trust_remote_code: bool = False
     use_liger_kernel: bool = True
     quantization: str = "none"
+    gguf: Optional[str] = None  # decision backend: registry name (jevos-q8_0) or .gguf path
 
 @dataclass
 class LoraConfig:
@@ -54,6 +55,32 @@ class GatewayConfig:
     cloudflared: bool = True
 
 @dataclass
+class DecisionLlamaCppConfig:
+    accelerator: str = "cuda"            # cuda | cuda12 | cpu | auto: pinned b11081 build to fetch
+    cache_dir: str = "~/.cache/bhaskera/llama.cpp"
+    runtime_dir: Optional[str] = None    # set by provisioning; or a local build of b11081
+
+@dataclass
+class DecisionBatchingConfig:
+    enabled: bool = False                # cross-request batching (seq-copy models only)
+    max_batch_size: int = 8
+    batch_wait_timeout_s: float = 0.005
+
+@dataclass
+class ServeDecisionConfig:
+    registry: str = "configs/models/gguf.yaml"
+    models_dir: str = "~/.cache/bhaskera/gguf"
+    device: str = "cuda"                 # llama.cpp device: cuda | gpu | cpu | auto
+    ctx: int = 8192                      # most tokens per question (state + question)
+    batch_size: int = 4                  # question branches per micro-batch (1-16)
+    prefill_chunk: int = 512             # llama.cpp ubatch
+    branch: str = "auto"                 # auto | seq-copy | state-restore
+    calibration: Optional[str] = None    # calibration JSON from bhaskera-calibrate
+    max_ongoing_requests: int = 4
+    batching: DecisionBatchingConfig = field(default_factory=DecisionBatchingConfig)
+    llama_cpp: DecisionLlamaCppConfig = field(default_factory=DecisionLlamaCppConfig)
+
+@dataclass
 class ServeConfig:
     enabled:   bool = False
     backend:   str  = "hf"
@@ -69,6 +96,7 @@ class ServeConfig:
     vllm: ServeBackendVLLMConfig = field(default_factory=ServeBackendVLLMConfig)
     hf: ServeBackendHFConfig = field(default_factory=ServeBackendHFConfig)
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
+    decision: ServeDecisionConfig = field(default_factory=ServeDecisionConfig)
 
 @dataclass
 class TurboQuantConfig:
@@ -246,6 +274,9 @@ def _dict_to_config(raw: dict) -> Config:
     vllm_raw    = _get(raw, "serve", "vllm", default={}) or {}
     hf_raw      = _get(raw, "serve", "hf",   default={}) or {}
     gw_raw      = _get(raw, "serve", "gateway", default={}) or {}
+    dec_raw     = _get(raw, "serve", "decision", default={}) or {}
+    dec_b_raw   = _get(raw, "serve", "decision", "batching", default={}) or {}
+    dec_l_raw   = _get(raw, "serve", "decision", "llama_cpp", default={}) or {}
 
     return Config(
         model=ModelConfig(
@@ -255,6 +286,7 @@ def _dict_to_config(raw: dict) -> Config:
             trust_remote_code=model_raw.get("trust_remote_code", False),
             use_liger_kernel=bool(model_raw.get("use_liger_kernel", True)),
             quantization=str(model_raw.get("quantization", "none")),
+            gguf=model_raw.get("gguf"),
         ),
         data=DataConfig(
             name=data_raw.get("name", "ultrachat"),
@@ -410,6 +442,27 @@ def _dict_to_config(raw: dict) -> Config:
                 enabled=bool(gw_raw.get("enabled", False)),
                 proxy_port=int(gw_raw.get("proxy_port", 0)),
                 cloudflared=bool(gw_raw.get("cloudflared", True)),
+            ),
+            decision=ServeDecisionConfig(
+                registry=str(dec_raw.get("registry", "configs/models/gguf.yaml")),
+                models_dir=str(dec_raw.get("models_dir", "~/.cache/bhaskera/gguf")),
+                device=str(dec_raw.get("device", "cuda")),
+                ctx=int(dec_raw.get("ctx", 8192)),
+                batch_size=int(dec_raw.get("batch_size", 4)),
+                prefill_chunk=int(dec_raw.get("prefill_chunk", 512)),
+                branch=str(dec_raw.get("branch", "auto")),
+                calibration=dec_raw.get("calibration"),
+                max_ongoing_requests=int(dec_raw.get("max_ongoing_requests", 4)),
+                batching=DecisionBatchingConfig(
+                    enabled=bool(dec_b_raw.get("enabled", False)),
+                    max_batch_size=int(dec_b_raw.get("max_batch_size", 8)),
+                    batch_wait_timeout_s=float(dec_b_raw.get("batch_wait_timeout_s", 0.005)),
+                ),
+                llama_cpp=DecisionLlamaCppConfig(
+                    accelerator=str(dec_l_raw.get("accelerator", "cuda")),
+                    cache_dir=str(dec_l_raw.get("cache_dir", "~/.cache/bhaskera/llama.cpp")),
+                    runtime_dir=dec_l_raw.get("runtime_dir"),
+                ),
             ),
         ),
     )

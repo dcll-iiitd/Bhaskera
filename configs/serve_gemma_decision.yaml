@@ -1,0 +1,36 @@
+# Gemma 4 E4B decisions (yes/no, choice, score) on the GPU through llama.cpp.
+#   bhaskera-serve --config configs/serve_jevos.yaml --ray-address local
+#   curl localhost:PORT/v1/systemone -H 'Content-Type: application/json' -d '{"model": "jev-latest",
+#     "state": "I was charged twice.", "questions": {"billing": {"type": "noul",
+#     "instructions": "Is this a billing problem?"}}}'
+model:
+  name: gemma-4-e4b        # label only; the weights come from model.gguf
+  gguf: gemma-4-e4b-q8_0 # registry name from configs/models/gguf.yaml, or a path to a .gguf file
+
+serve:
+  backend: decision
+  num_replicas: 1
+  ray_actor_options:
+    num_gpus: auto     # auto = 1 / num_replicas: every replica shares one GPU
+  port: 0
+  decision:
+    registry: configs/models/gguf.yaml
+    models_dir: ~/.cache/bhaskera/gguf
+    device: cuda
+    ctx: 8192
+    batch_size: 4
+    prefill_chunk: 512
+    branch: auto
+    calibration: null
+    max_ongoing_requests: 4
+    batching:
+      enabled: false
+      max_batch_size: 8
+      batch_wait_timeout_s: 0.005
+    llama_cpp:
+      accelerator: cuda
+      cache_dir: ~/.cache/bhaskera/llama.cpp
+  gateway:
+    enabled: false
+    proxy_port: 0
+    cloudflared: false
