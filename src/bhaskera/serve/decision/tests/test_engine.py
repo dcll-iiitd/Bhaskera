@@ -96,3 +96,43 @@ def test_provision_requires_model_gguf():
     cfg.serve.backend = "decision"
     with pytest.raises(ValueError, match="model.gguf"):
         loader.provision(cfg)
+
+
+def _relative_cfg(tmp_path, monkeypatch):
+    monkeypatch.delenv(llama_release.CACHE_ENV, raising=False)
+    monkeypatch.chdir(tmp_path)
+    cfg = Config()
+    cfg.serve.backend = "decision"
+    cfg.model.gguf = "jevos-q8_0"
+    cfg.serve.decision.registry = str(REGISTRY)
+    cfg.serve.decision.models_dir = str(tmp_path / "models")
+    monkeypatch.setattr(loader.registry, "resolve", lambda *a, **k: tmp_path / "w.gguf")
+    return cfg
+
+
+def test_provision_resolves_relative_cache_dir(monkeypatch, tmp_path):
+    cfg = _relative_cfg(tmp_path, monkeypatch)
+    cfg.serve.decision.llama_cpp.cache_dir = "runtimes"
+    monkeypatch.setattr(loader.llama_release, "install", lambda accelerator, progress: Path("runtimes/lib"))
+    loader.provision(cfg)
+    runtime_dir = cfg.serve.decision.llama_cpp.runtime_dir
+    assert os.path.isabs(runtime_dir)
+    assert runtime_dir == str((tmp_path / "runtimes" / "lib").resolve())
+    assert os.path.isabs(os.environ[llama_release.CACHE_ENV])
+
+
+def test_provision_explicit_runtime_dir_becomes_absolute(monkeypatch, tmp_path):
+    cfg = _relative_cfg(tmp_path, monkeypatch)
+    (tmp_path / "rt").mkdir()
+    (tmp_path / "rt" / llama_release.library_name()).write_text("")
+    cfg.serve.decision.llama_cpp.runtime_dir = "rt"
+    loader.provision(cfg)
+    assert cfg.serve.decision.llama_cpp.runtime_dir == str((tmp_path / "rt").resolve())
+
+
+def test_provision_explicit_runtime_dir_without_library_raises(monkeypatch, tmp_path):
+    cfg = _relative_cfg(tmp_path, monkeypatch)
+    (tmp_path / "empty").mkdir()
+    cfg.serve.decision.llama_cpp.runtime_dir = "empty"
+    with pytest.raises(ValueError, match="not found"):
+        loader.provision(cfg)

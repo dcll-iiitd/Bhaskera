@@ -33,8 +33,8 @@ def provision(cfg: "Config", progress=None) -> None:
         decision.calibration = str(Path(decision.calibration).expanduser().resolve())
     runtime = decision.llama_cpp
     if runtime.runtime_dir is None:
-        os.environ[llama_release.CACHE_ENV] = str(Path(runtime.cache_dir).expanduser())
-        runtime.runtime_dir = str(llama_release.install(runtime.accelerator, progress))
+        os.environ[llama_release.CACHE_ENV] = str(Path(runtime.cache_dir).expanduser().resolve())
+        runtime.runtime_dir = str(Path(llama_release.install(runtime.accelerator, progress)).resolve())
     else:
         library = llama_release.find_library(Path(runtime.runtime_dir).expanduser())
         if library is None:
