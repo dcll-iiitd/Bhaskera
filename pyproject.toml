@@ -27,18 +27,38 @@ vllm = [
     "vllm>=0.4.3"
 ]
 gateway = [
-    "langfuse>=2.0.0",
-    "openai>=1.0.0"
+    "langfuse>=3.0.0",
+    "openai>=1.0.0",
+    "httpx>=0.27.0"
+]
+# Decision backend (serve.backend: decision): llama.cpp via ctypes, no torch needed at runtime.
+decision = [
+    "pydantic>=2.11.0",
+    "jinja2>=3.1,<4",
+    "httpx>=0.27.0",
+    "pyyaml>=6.0"
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5"
 ]
 all = [
     "ray[serve]>=2.10.0",
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",
-    "pydantic>=2.5.0",
+    "pydantic>=2.11.0",
     "vllm>=0.4.3",
-    "langfuse>=2.0.0",
-    "openai>=1.0.0"
+    "langfuse>=3.0.0",
+    "openai>=1.0.0",
+    "httpx>=0.27.0",
+    "jinja2>=3.1,<4"
 ]
 
 [project.scripts]
 bhaskera-serve = "bhaskera.launcher.serve:main"
+bhaskera-decision-fetch = "bhaskera.launcher.decision_fetch:main"
+bhaskera-calibrate = "bhaskera.launcher.calibrate:main"
+
+[tool.pytest.ini_options]
+markers = ["gpu: needs a CUDA llama.cpp runtime and downloaded GGUF weights (GPU host only)"]
+addopts = "-m 'not gpu'"
