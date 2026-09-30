@@ -191,6 +191,7 @@ class LlamaBackend:
         self.prefill_chunk = prefill_chunk
         self.branch = branch
         self._lowest_free = None
+        self.max_requests = 1
 
     @classmethod
     def load(
@@ -205,6 +206,7 @@ class LlamaBackend:
         branch="auto",
         gpu_layers=None,
         identify=None,
+        max_requests=1,
     ):
         path = Path(path).resolve()
         if not path.is_file():
@@ -224,10 +226,12 @@ class LlamaBackend:
             path,
             directory=runtime_dir or llama_release.locate(device),
             device=device,
-            n_ctx=ctx + N_BATCH,
+            # Cross-request batching keeps up to `max_requests` prefixes resident at once
+            # (sequences 0..max_requests-1) plus `batch_size` branch sequences.
+            n_ctx=ctx * max_requests + N_BATCH,
             n_batch=N_BATCH,
             n_ubatch=prefill_chunk,
-            n_seq_max=batch_size + 1,
+            n_seq_max=batch_size + max_requests,
             threads=threads,
             gpu_layers=gpu_layers,
         )
@@ -251,6 +255,7 @@ class LlamaBackend:
         chosen = session.device
         strategy = resolve_branch(branch, architecture)
         backend = cls(session, tokenizer, {}, batch_size, prefill_chunk, strategy)
+        backend.max_requests = max_requests
         try:
             letter_mass = probe_answer_position(backend)
             # `auto` trusts a sequence copy only after seeing it agree with direct scoring.
@@ -430,3 +435,122 @@ class LlamaBackend:
         if self._lowest_free is not None:
             timing["peak_device_bytes"] = self.peak_device_bytes()
         return result, timing
+
+    def score_many(self, requests):
+        """Several compiled requests (prefix, jobs) in shared llama_decode calls; seq-copy only.
+
+        Sequence r holds request r's head: its shared prefix, or for a lone question its whole
+        prompt (read out directly). All branches of all requests are then scored together,
+        `batch_size` at a time, on sequences len(requests) .. len(requests)+batch_size-1.
+        Returns per-request logits (in order) and one timing dict for the batch.
+        """
+        if self.branch != "seq-copy":
+            raise ValueError("Cross-request batching needs the seq-copy branch strategy")
+        count = len(requests)
+        if not 0 < count <= self.max_requests:
+            raise ValueError(f"{count} requests; this context holds at most {self.max_requests}")
+        for prefix, jobs in requests:
+            if not jobs:
+                raise ValueError("No decisions supplied")
+            if any(
+                job.tokens[: len(prefix)] != prefix or len(job.tokens) <= len(prefix) for job in jobs
+            ):
+                raise ValueError("Invalid shared prefix")
+        session = self.session
+        started = time.perf_counter()
+        results = [{} for _ in requests]
+        evaluated, batches = 0, 0
+        session.clear()
+
+        # 1. Heads, packed end to end on their own sequences; lone questions read out here.
+        tokens, positions, sequences, rows, owners = [], [], [], [], []
+
+        def flush():
+            nonlocal tokens, positions, sequences, rows, owners, batches
+            if tokens:
+                session.decode(tokens, positions, sequences, rows)
+                for row, index in zip(rows, owners, strict=True):
+                    job = requests[index][1][0]
+                    results[index][job.id] = session.logits(row, job.slots)
+                batches += 1
+            tokens, positions, sequences, rows, owners = [], [], [], [], []
+
+        for index, (prefix, jobs) in enumerate(requests):
+            lone = len(jobs) == 1
+            head = jobs[0].tokens if lone else prefix
+            if not head:
+                continue
+            evaluated += len(head)
+            if len(head) > N_BATCH:
+                flush()
+                row = self._feed(head, 0, index, lone)
+                if lone:
+                    results[index][jobs[0].id] = session.logits(row, jobs[0].slots)
+                batches += 1
+                continue
+            if len(tokens) + len(head) > N_BATCH:
+                flush()
+            tokens += head
+            positions += range(len(head))
+            sequences += [index] * len(head)
+            if lone:
+                rows.append(len(tokens) - 1)
+                owners.append(index)
+        flush()
+        session.synchronize()
+        prefill_seconds = time.perf_counter() - started
+
+        # 2. Branches of every multi-question request, shortest suffix first.
+        branches = [
+            (index, job) for index, (_, jobs) in enumerate(requests) if len(jobs) > 1 for job in jobs
+        ]
+        branches.sort(key=lambda item: len(item[1].tokens) - len(requests[item[0]][0]))
+        groups, group, used = [], [], 0
+        for index, job in branches:
+            size = len(job.tokens) - len(requests[index][0])
+            if group and (len(group) == self.batch_size or used + size > N_BATCH):
+                groups.append(group)
+                group, used = [], 0
+            group.append((index, job))
+            used += size
+        if group:
+            groups.append(group)
+        for group in groups:
+            for offset, (index, _) in enumerate(group):
+                session.branch(index, count + offset)
+            if len(group) == 1:
+                index, job = group[0]
+                start = len(requests[index][0])
+                rows = [self._feed(job.tokens[start:], start, count, True)]
+                evaluated += len(job.tokens) - start
+            else:
+                tokens, positions, sequences, rows = [], [], [], []
+                for offset, (index, job) in enumerate(group):
+                    start = len(requests[index][0])
+                    suffix = job.tokens[start:]
+                    tokens += suffix
+                    positions += range(start, start + len(suffix))
+                    sequences += [count + offset] * len(suffix)
+                    rows.append(len(tokens) - 1)
+                session.decode(tokens, positions, sequences, rows)
+                evaluated += len(tokens)
+            for (index, job), row in zip(group, rows, strict=True):
+                results[index][job.id] = session.logits(row, job.slots)
+            for offset in range(len(group)):
+                session.drop(count + offset)
+            batches += 1
+        session.synchronize()
+        self._track_memory()
+        timing = {
+            "inference_seconds": time.perf_counter() - started,
+            "prefill_seconds": prefill_seconds,
+            "evaluated_tokens": evaluated,
+            "logical_input_tokens": sum(len(j.tokens) for _, jobs in requests for j in jobs),
+            "batches": batches,
+            "batch_requests": count,
+            "branch_strategy": "seq-copy",
+            "generated_tokens": 0,
+        }
+        if self._lowest_free is not None:
+            timing["peak_device_bytes"] = self.peak_device_bytes()
+        return results, timing

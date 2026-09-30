@@ -136,3 +136,24 @@ def test_provision_explicit_runtime_dir_without_library_raises(monkeypatch, tmp_
     cfg.serve.decision.llama_cpp.runtime_dir = "empty"
     with pytest.raises(ValueError, match="not found"):
         loader.provision(cfg)
+
+
+def test_decide_many_isolates_a_bad_request():
+    backend = FakeBackend({"a": [0.0, math.log(4.0)], "b": [math.log(4.0), 0.0]})
+    engine = Engine(backend, binary=True)
+    bad = {
+        "state": "s2",
+        "questions": {
+            "c": {
+                "type": "choice",
+                "instructions": "C?",
+                "options": [{"id": "x", "description": "X"}, {"id": "y", "description": "Y"}],
+            }
+        },
+    }
+    out = engine.decide_many([_boolean("a", state="s1"), bad, _boolean("b", state="s3")])
+    assert out[0]["answers"]["a"]["noul"] == pytest.approx(0.8)
+    assert isinstance(out[1], ValueError)
+    assert out[2]["answers"]["b"]["noul"] == pytest.approx(0.2)
+    assert backend.many_calls == [2]
+    assert out[0]["timing"]["batch_requests"] == 2

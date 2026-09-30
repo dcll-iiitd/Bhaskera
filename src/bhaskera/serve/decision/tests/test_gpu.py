@@ -121,3 +121,30 @@ def test_gemma_answers_choice_score_and_boolean(gemma):
     assert answers["refund"]["value"] is True
     assert answers["team"]["choice"] == "billing"
     assert answers["anger"]["score"] >= 0.5
+
+
+@pytest.fixture(scope="module")
+def jevos_batched():
+    backend = load("BHASKERA_JEVOS_GGUF", branch="seq-copy", max_requests=4)
+    yield Engine(backend, binary=True)
+    backend.session.close()
+
+
+BATCH = [
+    {"state": "I was charged twice for the same order.",
+     "questions": {"billing": {"type": "boolean", "instructions": "Is this a billing problem?"}}},
+    README_REQUEST,
+    {"state": {"review": "Battery died after two days. Waste of money.", "rating": 1},
+     "questions": {"upset": {"type": "boolean", "instructions": "Is the customer upset?"},
+                   "review": {"type": "boolean", "instructions": "Is this a product review?"}}},
+]
+
+
+def test_batched_scoring_matches_one_by_one(jevos_batched):
+    one = [jevos_batched.decide(r) for r in BATCH]
+    many = jevos_batched.decide_many(BATCH)
+    assert all(isinstance(m, dict) for m in many)
+    for single, batched in zip(one, many, strict=True):
+        for qid, answer in single["answers"].items():
+            assert abs(answer["noul"] - batched["answers"][qid]["noul"]) <= 0.01
+    assert many[0]["timing"]["batch_requests"] == 3

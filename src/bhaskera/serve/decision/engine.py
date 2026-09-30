@@ -106,3 +106,80 @@ class Engine:
                 "total_seconds": time.perf_counter() - started,
             },
         }
+
+    def decide_many(self, requests: list) -> list:
+        """Several requests scored together in shared llama_decode calls (seq-copy only).
+
+        Returns one entry per request, in order: the dict `decide` returns, or the ValueError
+        that request alone raised; a bad request never fails its neighbours. Every request
+        shares its state prefix, whatever its `mode`.
+        """
+        started = time.perf_counter()
+        outcomes: list = [None] * len(requests)
+        compiled = []
+        with self._lock:
+            acquired = time.perf_counter()
+            for index, raw in enumerate(requests):
+                try:
+                    request = Request.model_validate(
+                        raw.model_dump() if isinstance(raw, Request) else raw
+                    )
+                    if self.binary:
+                        others = [qid for qid, q in request.questions.items() if q.type != "boolean"]
+                        if others:
+                            raise ValueError(
+                                "Binary model: only yes/no (noul) questions are answered; "
+                                f"not {', '.join(others)}"
+                            )
+                        prefix, jobs = compile_request(
+                            self.backend.tokenizer, request, self.ctx, binary=self.binary_version
+                        )
+                    else:
+                        prefix, jobs = compile_request(self.backend.tokenizer, request, self.ctx)
+                except ValueError as error:
+                    outcomes[index] = error
+                    continue
+                compiled.append((index, request, prefix, jobs))
+            encoded = time.perf_counter()
+            if not compiled:
+                return outcomes
+            try:
+                scored, timing = self._worker.submit(
+                    self.backend.score_many, [(prefix, jobs) for _, _, prefix, jobs in compiled]
+                ).result()
+            except ValueError as error:
+                for index, *_ in compiled:
+                    outcomes[index] = error
+                return outcomes
+            finished = time.perf_counter()
+            for (index, request, prefix, jobs), logits in zip(compiled, scored, strict=True):
+                outcomes[index] = {
+                    "model": self.backend.metadata,
+                    "mode": "shared",
+                    "prefix_tokens": len(prefix),
+                    "answers": self._answers(request, jobs, logits),
+                    "calibration": self.calibration.model_dump() if self.calibration else None,
+                    "timing": {
+                        **timing,
+                        "batch_requests": len(compiled),
+                        "queue_seconds": acquired - started,
+                        "compile_seconds": encoded - acquired,
+                        "total_seconds": finished - started,
+                    },
+                }
+        return outcomes
+
+    def _answers(self, request: Request, jobs, logits) -> dict:
+        answers = {}
+        for job in jobs:
+            question = request.questions[job.id]
+            kind = "boolean" if self.binary else question.type
+            temperature = (
+                self.calibration.temperature_for(kind, len(candidates(question)))
+                if self.calibration
+                else 1.0
+            )
+            answers[job.id] = decode(question, logits[job.id], temperature)
+            answers[job.id]["prompt_sha256"] = job.prompt_sha256
+            answers[job.id]["input_tokens"] = len(job.tokens)
+        return answers
