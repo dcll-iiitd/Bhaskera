@@ -48,10 +48,15 @@ def decision_options(cfg: "Config") -> dict:
     actor = dict(cfg.serve.ray_actor_options)
     if actor.get("num_gpus") == "auto":
         actor["num_gpus"] = 1 / cfg.serve.num_replicas
+    max_ongoing = cfg.serve.decision.max_ongoing_requests
+    batching = cfg.serve.decision.batching
+    if batching.enabled:
+        # A replica must hold a whole batch in flight for @serve.batch to fill it.
+        max_ongoing = max(max_ongoing, batching.max_batch_size)
     return {
         "num_replicas": cfg.serve.num_replicas,
         "ray_actor_options": actor,
-        "max_ongoing_requests": cfg.serve.decision.max_ongoing_requests,
+        "max_ongoing_requests": max_ongoing,
     }
 
 

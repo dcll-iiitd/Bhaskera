@@ -59,7 +59,8 @@ def load_engine(cfg: "Config") -> "Engine":
         batch_size=decision.batch_size,
         prefill_chunk=decision.prefill_chunk,
         runtime_dir=decision.llama_cpp.runtime_dir,
-        branch=decision.branch,
+        branch="seq-copy" if decision.batching.enabled else decision.branch,
+        max_requests=decision.batching.max_batch_size if decision.batching.enabled else 1,
         identify=lambda sha256: registry.identify(sha256, models),
     )
     calibration = Calibration.from_file(Path(decision.calibration)) if decision.calibration else None

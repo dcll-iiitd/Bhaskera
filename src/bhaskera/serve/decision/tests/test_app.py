@@ -63,3 +63,10 @@ def test_route_annotations_survive_pickling_by_value():
     finally:
         cloudpickle.unregister_pickle_by_value(dd)
     assert typing.get_type_hints(clone)["body"] is wire.SystemOneRequest
+
+
+def test_batching_raises_max_ongoing_requests():
+    cfg = _cfg(2, "auto")
+    cfg.serve.decision.batching.enabled = True
+    cfg.serve.decision.batching.max_batch_size = 16
+    assert decision_options(cfg)["max_ongoing_requests"] == 16

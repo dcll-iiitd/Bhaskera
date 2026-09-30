@@ -55,9 +55,24 @@ class DecisionDeployment:
             self._served, meta.get("device"), meta.get("branch_strategy"),
             meta.get("probe_branch_max_delta"),
         )
+        batching = cfg.serve.decision.batching
+        self._batching = batching.enabled
+        if self._batching:
+            self._decide_batch.set_max_batch_size(batching.max_batch_size)
+            self._decide_batch.set_batch_wait_timeout_s(batching.batch_wait_timeout_s)
+
+    @serve.batch(max_batch_size=8, batch_wait_timeout_s=0.005)
+    async def _decide_batch(self, natives: list) -> list:
+        # One entry per request: a result dict or the ValueError that request raised.
+        return await asyncio.to_thread(self._engine.decide_many, natives)
 
     async def _decide(self, native):
-        return await asyncio.to_thread(self._engine.decide, native)
+        if not self._batching:
+            return await asyncio.to_thread(self._engine.decide, native)
+        result = await self._decide_batch(native)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     @_decision_app.post("/v1/systemone", response_model=wire.SystemOneResponse)
     async def systemone(self, body: wire.SystemOneRequest, response: Response):
