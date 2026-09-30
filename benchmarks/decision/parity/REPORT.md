@@ -47,4 +47,4 @@ decoded together in one CUDA batch), not from the deployment code. Worst c=16 ro
 | p166 | q1 | 0.4610 | 0.4184 | 0.0426 |
 | p089 | q1 | 0.3971 | 0.4367 | 0.0396 |
 
-Batching stays off pending a decision on the tolerance.
+Decision (user, 2026-09-30): batch-composition drift is reported, not a gate (it is below llama.cpp's own CPU-vs-CUDA drift of 0.071). The c=1 diagnostic (bit-identical) is the fidelity check for the batching wiring; the c=16 numbers are reported drift.
