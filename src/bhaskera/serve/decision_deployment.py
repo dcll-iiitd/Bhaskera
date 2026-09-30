@@ -8,7 +8,6 @@ One replica = one llama.cpp context (``loader.load_engine``).  Several replicas 
 GPU (``ray_actor_options.num_gpus: auto``).  The engine scores on its own worker thread, so
 handlers await it off the event loop.
 """
-from __future__ import annotations
 
 import asyncio
 import datetime
