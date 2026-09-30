@@ -20,3 +20,6 @@ env/
 *.err
 *.out
 AGENTS.md
+
+# Decision benchmarks: request sets are regenerated deterministically
+benchmarks/decision/requests/
