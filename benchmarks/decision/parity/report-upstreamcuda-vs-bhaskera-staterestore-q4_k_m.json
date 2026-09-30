@@ -1,0 +1,82 @@
+{
+  "answers": 1100,
+  "max_delta": 0.0,
+  "mean_delta": 0.0,
+  "decisions_flipped": 0,
+  "worst": [
+    {
+      "id": "p299",
+      "question": "q9",
+      "reference": 0.08469410602733198,
+      "candidate": 0.08469410602733198,
+      "delta": 0.0
+    },
+    {
+      "id": "p299",
+      "question": "q8",
+      "reference": 0.9655338696137412,
+      "candidate": 0.9655338696137412,
+      "delta": 0.0
+    },
+    {
+      "id": "p299",
+      "question": "q7",
+      "reference": 0.9537872315861808,
+      "candidate": 0.9537872315861808,
+      "delta": 0.0
+    },
+    {
+      "id": "p299",
+      "question": "q6",
+      "reference": 0.9737988207718645,
+      "candidate": 0.9737988207718645,
+      "delta": 0.0
+    },
+    {
+      "id": "p299",
+      "question": "q5",
+      "reference": 0.04437943087651382,
+      "candidate": 0.04437943087651382,
+      "delta": 0.0
+    },
+    {
+      "id": "p299",
+      "question": "q4",
+      "reference": 0.948295332945186,
+      "candidate": 0.948295332945186,
+      "delta": 0.0
+    },
+    {
+      "id": "p299",
+      "question": "q3",
+      "reference": 0.9788403774784667,
+      "candidate": 0.9788403774784667,
+      "delta": 0.0
+    },
+    {
+      "id": "p299",
+      "question": "q2",
+      "reference": 0.931216925833442,
+      "candidate": 0.931216925833442,
+      "delta": 0.0
+    },
+    {
+      "id": "p299",
+      "question": "q1",
+      "reference": 0.18457888226284458,
+      "candidate": 0.18457888226284458,
+      "delta": 0.0
+    },
+    {
+      "id": "p299",
+      "question": "q0",
+      "reference": 0.8551620898491482,
+      "candidate": 0.8551620898491482,
+      "delta": 0.0
+    }
+  ],
+  "missing": [],
+  "status_mismatch": [],
+  "tolerance": 0.01,
+  "passed": true
+}

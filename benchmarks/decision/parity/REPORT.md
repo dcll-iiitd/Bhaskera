@@ -14,6 +14,12 @@
 | upstream CPU | Bhaskera CUDA | q4_k_m | 1100 | 0.1467 | 0.00780 | 11 | false |
 | upstream CUDA | Bhaskera CUDA | q4_k_m | 1100 | 0.1103 | 0.00392 | 4 | false |
 | upstream CPU | upstream CUDA | q4_k_m | 1100 | 0.1115 | 0.00782 | 11 | false |
+| upstream CUDA | Bhaskera CUDA (branch=state-restore) | q8_0 | 1100 | 0.0000 | 0.00000 | 0 | true |
+| upstream CPU | Bhaskera CUDA (branch=state-restore) | q8_0 | 1100 | 0.0710 | 0.00374 | 6 | false |
+| upstream CUDA | Bhaskera CUDA (branch=state-restore) | q4_k_m | 1100 | 0.0000 | 0.00000 | 0 | true |
+| upstream CPU | Bhaskera CUDA (branch=state-restore) | q4_k_m | 1100 | 0.1115 | 0.00782 | 11 | false |
+
+Diagnostic (state-restore): upstream's /health reports `branch_strategy: state-restore` (its default), while Bhaskera's default is `probe`/auto. With Bhaskera set to state-restore, its CUDA answers are bit-identical to upstream CUDA (max_delta 0.0, 0 flips, 1100 answers, both quants), so the port itself is exact and the drift in the gate rows is branch-strategy/batching numerics on GPU plus llama.cpp CUDA-vs-CPU numerics; the gate verdict below is unchanged.
 
 Parity gate (upstream CPU vs Bhaskera CUDA, <= 0.01): **FAIL** for q8_0 and q4_k_m.
 
