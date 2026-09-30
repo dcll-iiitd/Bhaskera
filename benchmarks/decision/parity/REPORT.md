@@ -25,3 +25,26 @@ Diagnostic (state-restore): upstream's /health reports `branch_strategy: state-r
 Reported drift (not a gate): the original comparison, upstream CPU vs Bhaskera CUDA with the default seq-copy branch, gave max 0.054 / 0.147 (q8_0 / q4_k_m) versus upstream's own CPU vs CUDA drift of 0.071 / 0.112; mean deltas are equal (0.0037 / 0.0078), flips 3 vs 6 (q8_0) and 11 vs 11 (q4_k_m). Seq-copy is Bhaskera's default; the benchmark adds a state-restore run.
 
 Port-fidelity gate (Bhaskera CUDA state-restore vs upstream CUDA, <= 0.01): PASS for q8_0 and q4_k_m (bit-identical: max 0.0, 0 flips).
+
+## Batching fidelity
+
+Batched vs unbatched Bhaskera (CUDA, q8_0, seq-copy), 1100 answers, gate 0.01.
+
+| run | max | mean | flips | result |
+|---|---|---|---|---|
+| batched, concurrency 16 | 0.0517 | 0.0029 | 4 | FAIL |
+| batched, concurrency 1 (diagnostic) | 0.0 | 0.0 | 0 | bit-identical |
+
+At concurrency 1 every batch holds one request and the output equals the unbatched run exactly, so the wiring
+(`serve.batch`, `decide_many`, `max_requests`) is correct. The c=16 drift comes from batch composition (requests
+decoded together in one CUDA batch), not from the deployment code. Worst c=16 rows:
+
+| id | question | unbatched | batched | delta |
+|---|---|---|---|---|
+| p275 | q4 | 0.3811 | 0.3294 | 0.0517 |
+| p179 | q7 | 0.6227 | 0.5752 | 0.0475 |
+| p050 | q0 | 0.6991 | 0.6540 | 0.0451 |
+| p166 | q1 | 0.4610 | 0.4184 | 0.0426 |
+| p089 | q1 | 0.3971 | 0.4367 | 0.0396 |
+
+Batching stays off pending a decision on the tolerance.
