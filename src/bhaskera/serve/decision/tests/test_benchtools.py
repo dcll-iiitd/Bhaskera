@@ -61,9 +61,9 @@ def test_percentile_and_summary():
 
 
 def test_table_renders_markdown():
-    rows = [{"label": "x", "requests": "bench_short_q1", "concurrency": 4, "req_per_s": 12.3,
+    rows = [{"label": "x", "requests": "bench_short_q1", "concurrency": 4, "completed": 180, "req_per_s": 12.3,
              "questions_per_s": 12.3, "p50_ms": 5.0, "p90_ms": 7.0, "p99_ms": 9.0, "errors": 0,
              "max_memory_mib": 1024.0, "mean_util_pct": 55.0}]
     text = bt.table(rows)
     assert text.splitlines()[0].startswith("| label |")
-    assert "| x | bench_short_q1 | 4 | 12.3 |" in text
+    assert "| x | bench_short_q1 | 4 | 180 | 12.3 |" in text

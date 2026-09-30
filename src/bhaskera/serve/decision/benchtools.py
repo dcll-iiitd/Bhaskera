@@ -217,7 +217,7 @@ def summarize(latencies: list[float], errors: int, questions: int, seconds: floa
     }
 
 
-COLUMNS = ("label", "requests", "concurrency", "req_per_s", "questions_per_s", "p50_ms",
+COLUMNS = ("label", "requests", "concurrency", "completed", "req_per_s", "questions_per_s", "p50_ms",
            "p90_ms", "p99_ms", "errors", "max_memory_mib", "mean_util_pct")
 
 
