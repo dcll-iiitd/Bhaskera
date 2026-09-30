@@ -42,23 +42,26 @@ def _trace_decision(user_id: str, body: dict, status: int, payload: dict, second
     """One Langfuse trace per /v1/systemone call, one span per question. Never raises:
     tracing must not fail or slow a decision (the SDK ships events in the background)."""
     try:
-        from langfuse import get_client
+        from langfuse import get_client, propagate_attributes
 
         langfuse = get_client()
         questions = body.get("questions") or {}
-        with langfuse.start_as_current_span(
-            name="systemone", input={"state": body.get("state"), "questions": questions}
+        with langfuse.start_as_current_observation(
+            name="systemone", as_type="span",
+            input={"state": body.get("state"), "questions": questions},
         ) as trace:
-            trace.update_trace(user_id=user_id, tags=["decision"])
-            for qid, answer in (payload.get("answers") or {}).items():
-                with langfuse.start_as_current_span(
-                    name=f"question:{qid}", input=questions.get(qid), output=answer
-                ):
-                    pass
+            with propagate_attributes(user_id=user_id, tags=["decision"]):
+                for qid, answer in (payload.get("answers") or {}).items():
+                    with langfuse.start_as_current_observation(
+                        name=f"question:{qid}", as_type="span",
+                        input=questions.get(qid), output=answer,
+                    ):
+                        pass
             trace.update(output={"status": status, "usage": payload.get("usage"),
                                  "gateway_seconds": seconds})
     except Exception:
         logger.debug("Langfuse tracing of a decision failed", exc_info=True)
+
 
 @app.post("/v1/chat/completions")
 async def chat_gateway(request: Request, creds: HTTPAuthorizationCredentials = Depends(security)):
@@ -109,9 +112,13 @@ async def systemone_gateway(request: Request, creds: HTTPAuthorizationCredential
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
     started = time.perf_counter()
-    upstream = await decision_client.post("/v1/systemone", json=body)
+    try:
+        upstream = await decision_client.post("/v1/systemone", json=body)
+        payload = upstream.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        return JSONResponse(status_code=502,
+                            content={"detail": f"decision backend unavailable: {exc!r}"})
     seconds = time.perf_counter() - started
-    payload = upstream.json()
     _trace_decision(user_id, body, upstream.status_code, payload, seconds)
     headers = {k: v for k, v in upstream.headers.items() if k.lower() == "server-timing"}
     return JSONResponse(status_code=upstream.status_code, content=payload, headers=headers)

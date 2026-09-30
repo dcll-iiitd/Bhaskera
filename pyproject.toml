@@ -27,7 +27,7 @@ vllm = [
     "vllm>=0.4.3"
 ]
 gateway = [
-    "langfuse>=3.0.0",
+    "langfuse>=4,<5",
     "openai>=1.0.0",
     "httpx>=0.27.0"
 ]
@@ -48,7 +48,7 @@ all = [
     "uvicorn[standard]>=0.29.0",
     "pydantic>=2.11.0",
     "vllm>=0.4.3",
-    "langfuse>=3.0.0",
+    "langfuse>=4,<5",
     "openai>=1.0.0",
     "httpx>=0.27.0",
     "jinja2>=3.1,<4"
