@@ -1,8 +1,14 @@
+import logging
+import os
+import time
+
+import httpx
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from langfuse.openai import AsyncOpenAI  # <-- Switched to AsyncOpenAI
-import os
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Bhaskera Custom Gateway")
 security = HTTPBearer()
@@ -20,12 +26,43 @@ internal_client = AsyncOpenAI(
     api_key="internal_dummy_key"
 )
 
-@app.post("/v1/chat/completions")
-async def chat_gateway(request: Request, creds: HTTPAuthorizationCredentials = Depends(security)):
+# Decision backend (serve.backend: decision): plain JSON forwarding, traced per question.
+decision_client = httpx.AsyncClient(
+    base_url=f"http://127.0.0.1:{ray_port}", timeout=httpx.Timeout(600.0)
+)
+
+
+def _authorize(creds: HTTPAuthorizationCredentials) -> str:
     if creds.credentials not in VALID_KEYS:
         raise HTTPException(status_code=401, detail="Invalid API Key")
-    
-    user_id = VALID_KEYS[creds.credentials]
+    return VALID_KEYS[creds.credentials]
+
+
+def _trace_decision(user_id: str, body: dict, status: int, payload: dict, seconds: float) -> None:
+    """One Langfuse trace per /v1/systemone call, one span per question. Never raises:
+    tracing must not fail or slow a decision (the SDK ships events in the background)."""
+    try:
+        from langfuse import get_client
+
+        langfuse = get_client()
+        questions = body.get("questions") or {}
+        with langfuse.start_as_current_span(
+            name="systemone", input={"state": body.get("state"), "questions": questions}
+        ) as trace:
+            trace.update_trace(user_id=user_id, tags=["decision"])
+            for qid, answer in (payload.get("answers") or {}).items():
+                with langfuse.start_as_current_span(
+                    name=f"question:{qid}", input=questions.get(qid), output=answer
+                ):
+                    pass
+            trace.update(output={"status": status, "usage": payload.get("usage"),
+                                 "gateway_seconds": seconds})
+    except Exception:
+        logger.debug("Langfuse tracing of a decision failed", exc_info=True)
+
+@app.post("/v1/chat/completions")
+async def chat_gateway(request: Request, creds: HTTPAuthorizationCredentials = Depends(security)):
+    user_id = _authorize(creds)
     
     try:
         body = await request.json()
@@ -62,3 +99,19 @@ async def chat_gateway(request: Request, creds: HTTPAuthorizationCredentials = D
             user=user_id,
         )
         return response
+
+
+@app.post("/v1/systemone")
+async def systemone_gateway(request: Request, creds: HTTPAuthorizationCredentials = Depends(security)):
+    user_id = _authorize(creds)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    started = time.perf_counter()
+    upstream = await decision_client.post("/v1/systemone", json=body)
+    seconds = time.perf_counter() - started
+    payload = upstream.json()
+    _trace_decision(user_id, body, upstream.status_code, payload, seconds)
+    headers = {k: v for k, v in upstream.headers.items() if k.lower() == "server-timing"}
+    return JSONResponse(status_code=upstream.status_code, content=payload, headers=headers)
