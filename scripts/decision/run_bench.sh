@@ -5,7 +5,7 @@
 #     bash scripts/decision/run_bench.sh upstream|replicas|staterestore|quant|gateway|batching
 set -euo pipefail
 MODE=${1:?usage: run_bench.sh upstream|replicas|staterestore|quant|gateway|batching}
-BASE=${BASE_CONFIG:?path to this host's serve_jevos config}
+BASE=${BASE_CONFIG:?path to the host serve_jevos config}
 JEV_DIR=${JEV_DIR:?path to the uv-synced upstream jev checkout}
 GGUF_DIR=${GGUF_DIR:?directory holding jevos-v2-q8_0.gguf and jevos-v2-q4_k_m.gguf}
 OUT=${OUT:-benchmarks/decision/results}
