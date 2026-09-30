@@ -73,3 +73,51 @@ def test_shared_prefix_matches_direct_scoring(jevos):
     direct = jevos.decide({**README_REQUEST, "mode": "direct"})["answers"]
     for qid in shared:
         assert abs(shared[qid]["noul"] - direct[qid]["noul"]) <= 0.01
+
+
+TICKET = {
+    "state": {
+        "ticket": "Hi, we were billed twice for March. Refund the duplicate today or we cancel.",
+        "plan": "Business, monthly, 12 seats",
+    },
+    "questions": {
+        "refund": {"type": "boolean", "instructions": "Does the customer ask for a refund?"},
+        "team": {
+            "type": "choice",
+            "instructions": "Which team should handle this?",
+            "options": [
+                {"id": "billing", "description": "Payments, invoicing, refunds"},
+                {"id": "technical", "description": "Bugs, outages"},
+                {"id": "sales", "description": "Pricing, new contracts"},
+            ],
+        },
+        "anger": {
+            "type": "score",
+            "instructions": "How angry is the customer?",
+            "levels": ["Calm", "Frustrated but civil", "Very angry or threatening"],
+        },
+    },
+}
+
+
+@pytest.fixture(scope="module")
+def gemma():
+    backend = load("BHASKERA_GEMMA_GGUF")
+    yield Engine(backend)
+    backend.session.close()
+
+
+def test_gemma_uses_the_chat_template_path(gemma):
+    meta = gemma.backend.metadata
+    print("gemma:", meta["architecture"], meta["branch_strategy"], meta["probe_letter_mass"])
+    assert meta["device"] == "gpu"
+    assert not meta["binary_prompt_version"]
+    assert meta["probe_letter_mass"] >= 0.5
+
+
+def test_gemma_answers_choice_score_and_boolean(gemma):
+    answers = gemma.decide(TICKET)["answers"]
+    print({k: {x: v[x] for x in ("probabilities",)} for k, v in answers.items()})
+    assert answers["refund"]["value"] is True
+    assert answers["team"]["choice"] == "billing"
+    assert answers["anger"]["score"] >= 0.5
