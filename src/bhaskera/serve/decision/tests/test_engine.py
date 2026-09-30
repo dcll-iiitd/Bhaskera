@@ -140,6 +140,7 @@ def test_provision_explicit_runtime_dir_without_library_raises(monkeypatch, tmp_
 
 def test_decide_many_isolates_a_bad_request():
     backend = FakeBackend({"a": [0.0, math.log(4.0)], "b": [math.log(4.0), 0.0]})
+    backend.max_requests = 4
     engine = Engine(backend, binary=True)
     bad = {
         "state": "s2",
@@ -157,3 +158,19 @@ def test_decide_many_isolates_a_bad_request():
     assert out[2]["answers"]["b"]["noul"] == pytest.approx(0.2)
     assert backend.many_calls == [2]
     assert out[0]["timing"]["batch_requests"] == 2
+
+
+def test_decide_many_model_matches_decide():
+    backend = FakeBackend({"a": [0.0, math.log(4.0)]})
+    engine = Engine(backend, binary=True)
+    request = _boolean("a")
+    assert engine.decide_many([request])[0]["model"] == engine.decide(request)["model"]
+
+
+def test_decide_many_chunks_to_the_backend_capacity():
+    backend = FakeBackend({q: [0.0, math.log(4.0)] for q in "abc"})
+    backend.max_requests = 2
+    engine = Engine(backend, binary=True)
+    out = engine.decide_many([_boolean(q, state=f"s{q}") for q in "abc"])
+    assert all(isinstance(o, dict) for o in out)
+    assert backend.many_calls == [2, 1]

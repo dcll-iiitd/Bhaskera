@@ -36,83 +36,28 @@ class Engine:
             request.model_dump() if isinstance(request, Request) else request
         )
         started = time.perf_counter()
-        if self.binary:
-            return self._decide_binary(request, started)
+        # A binary model answers yes/no questions only, on the binary prompt (0/1 tokens):
+        # a request with any other question type is refused before the lock is taken.
+        self._check_binary(request)
         with self._lock:
             acquired = time.perf_counter()
-            prefix, jobs = compile_request(self.backend.tokenizer, request, self.ctx)
+            prefix, jobs = self._compile(request)
             encoded = time.perf_counter()
             logits, timing = self._worker.submit(
                 self.backend.score, prefix, jobs, request.mode
             ).result()
-            answers = {}
-            for job in jobs:
-                question = request.questions[job.id]
-                temperature = (
-                    self.calibration.temperature_for(question.type, len(candidates(question)))
-                    if self.calibration
-                    else 1.0
-                )
-                answers[job.id] = decode(question, logits[job.id], temperature)
-                answers[job.id]["prompt_sha256"] = job.prompt_sha256
-                answers[job.id]["input_tokens"] = len(job.tokens)
-        return {
-            "model": self.backend.metadata,
-            "mode": request.mode,
-            # Tokens of the state that every question starts with: counted once in `usage`.
-            "prefix_tokens": len(prefix),
-            "answers": answers,
-            "calibration": self.calibration.model_dump() if self.calibration else None,
-            "timing": {
-                **timing,
-                "queue_seconds": acquired - started,
-                "compile_seconds": encoded - acquired,
-                "total_seconds": time.perf_counter() - started,
-            },
-        }
-
-    def _decide_binary(self, request: Request, started: float) -> dict:
-        """A binary model answers yes/no questions only, on the binary prompt (0/1 tokens).
-
-        There is no choice and no score: a request with any other question type is refused.
-        """
-        others = [qid for qid, q in request.questions.items() if q.type != "boolean"]
-        if others:
-            raise ValueError(
-                f"Binary model: only yes/no (noul) questions are answered; not {', '.join(others)}"
-            )
-        with self._lock:
-            acquired = time.perf_counter()
-            prefix, jobs = compile_request(self.backend.tokenizer, request, self.ctx, binary=self.binary_version)
-            encoded = time.perf_counter()
-            logits, timing = self._worker.submit(self.backend.score, prefix, jobs, request.mode).result()
-            answers = {}
-            for job in jobs:
-                question = request.questions[job.id]
-                temperature = self.calibration.temperature_for("boolean", 2) if self.calibration else 1.0
-                answers[job.id] = decode(question, logits[job.id], temperature)
-                answers[job.id]["prompt_sha256"] = job.prompt_sha256
-                answers[job.id]["input_tokens"] = len(job.tokens)
-        return {
-            "model": self.backend.metadata | {"prompt_version": self.binary_version},
-            "mode": request.mode,
-            "prefix_tokens": len(prefix),
-            "answers": answers,
-            "calibration": self.calibration.model_dump() if self.calibration else None,
-            "timing": {
-                **timing,
-                "queue_seconds": acquired - started,
-                "compile_seconds": encoded - acquired,
-                "total_seconds": time.perf_counter() - started,
-            },
-        }
+            answers = self._answers(request, jobs, logits)
+        return self._response(
+            request, prefix, answers, request.mode, timing, started, acquired, encoded
+        )
 
     def decide_many(self, requests: list) -> list:
         """Several requests scored together in shared llama_decode calls (seq-copy only).
 
         Returns one entry per request, in order: the dict `decide` returns, or the ValueError
         that request alone raised; a bad request never fails its neighbours. Every request
-        shares its state prefix, whatever its `mode`.
+        shares its state prefix, whatever its `mode`. Requests are scored in chunks of at most
+        the backend's `max_requests`; a scoring error fails only its chunk.
         """
         started = time.perf_counter()
         outcomes: list = [None] * len(requests)
@@ -124,50 +69,71 @@ class Engine:
                     request = Request.model_validate(
                         raw.model_dump() if isinstance(raw, Request) else raw
                     )
-                    if self.binary:
-                        others = [qid for qid, q in request.questions.items() if q.type != "boolean"]
-                        if others:
-                            raise ValueError(
-                                "Binary model: only yes/no (noul) questions are answered; "
-                                f"not {', '.join(others)}"
-                            )
-                        prefix, jobs = compile_request(
-                            self.backend.tokenizer, request, self.ctx, binary=self.binary_version
-                        )
-                    else:
-                        prefix, jobs = compile_request(self.backend.tokenizer, request, self.ctx)
+                    self._check_binary(request)
+                    prefix, jobs = self._compile(request)
                 except ValueError as error:
                     outcomes[index] = error
                     continue
                 compiled.append((index, request, prefix, jobs))
             encoded = time.perf_counter()
-            if not compiled:
-                return outcomes
-            try:
-                scored, timing = self._worker.submit(
-                    self.backend.score_many, [(prefix, jobs) for _, _, prefix, jobs in compiled]
-                ).result()
-            except ValueError as error:
-                for index, *_ in compiled:
-                    outcomes[index] = error
-                return outcomes
-            finished = time.perf_counter()
-            for (index, request, prefix, jobs), logits in zip(compiled, scored, strict=True):
-                outcomes[index] = {
-                    "model": self.backend.metadata,
-                    "mode": "shared",
-                    "prefix_tokens": len(prefix),
-                    "answers": self._answers(request, jobs, logits),
-                    "calibration": self.calibration.model_dump() if self.calibration else None,
-                    "timing": {
-                        **timing,
-                        "batch_requests": len(compiled),
-                        "queue_seconds": acquired - started,
-                        "compile_seconds": encoded - acquired,
-                        "total_seconds": finished - started,
-                    },
-                }
+            size = max(1, getattr(self.backend, "max_requests", 1))
+            for offset in range(0, len(compiled), size):
+                chunk = compiled[offset : offset + size]
+                try:
+                    scored, timing = self._worker.submit(
+                        self.backend.score_many, [(prefix, jobs) for _, _, prefix, jobs in chunk]
+                    ).result()
+                except ValueError as error:
+                    for index, *_ in chunk:
+                        outcomes[index] = error
+                    continue
+                for (index, request, prefix, jobs), logits in zip(chunk, scored, strict=True):
+                    outcomes[index] = self._response(
+                        request,
+                        prefix,
+                        self._answers(request, jobs, logits),
+                        "shared",
+                        {**timing, "batch_requests": len(chunk)},
+                        started,
+                        acquired,
+                        encoded,
+                    )
         return outcomes
+
+    def _check_binary(self, request: Request) -> None:
+        if not self.binary:
+            return
+        others = [qid for qid, q in request.questions.items() if q.type != "boolean"]
+        if others:
+            raise ValueError(
+                f"Binary model: only yes/no (noul) questions are answered; not {', '.join(others)}"
+            )
+
+    def _compile(self, request: Request):
+        if self.binary:
+            return compile_request(
+                self.backend.tokenizer, request, self.ctx, binary=self.binary_version
+            )
+        return compile_request(self.backend.tokenizer, request, self.ctx)
+
+    def _response(self, request, prefix, answers, mode, timing, started, acquired, encoded) -> dict:
+        model = self.backend.metadata
+        if self.binary:
+            model = model | {"prompt_version": self.binary_version}
+        return {
+            "model": model,
+            "mode": mode,
+            # Tokens of the state that every question starts with: counted once in `usage`.
+            "prefix_tokens": len(prefix),
+            "answers": answers,
+            "calibration": self.calibration.model_dump() if self.calibration else None,
+            "timing": {
+                **timing,
+                "queue_seconds": acquired - started,
+                "compile_seconds": encoded - acquired,
+                "total_seconds": time.perf_counter() - started,
+            },
+        }
 
     def _answers(self, request: Request, jobs, logits) -> dict:
         answers = {}

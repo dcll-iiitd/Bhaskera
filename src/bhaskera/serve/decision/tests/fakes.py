@@ -32,6 +32,7 @@ class FakeBackend:
         self.logits = logits_by_question
         self.calls: list = []
         self.many_calls: list[int] = []
+        self.max_requests = 1
 
     def score(self, prefix, jobs, mode="shared"):
         self.calls.append((prefix, [job.id for job in jobs], mode))
