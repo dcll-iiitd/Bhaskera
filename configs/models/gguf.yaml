@@ -4,21 +4,21 @@
 # and are verified against sha256 before use.
 models:
   jevos:
-    source: feder-cr/jev release "jevos"
+    source: feder-cr/jev release "jevos-v2"
     repo: feder-cr/jev
-    revision: jevos
+    revision: jevos-v2
     license: see https://github.com/feder-cr/jev
     architecture: llama
-    base_url: https://github.com/feder-cr/jev/releases/download/jevos
+    base_url: https://github.com/feder-cr/jev/releases/download/jevos-v2
     files:
       q8_0:
-        file: jevos-q8_0.gguf
-        sha256: 7027cf624c518122b3b0913f67a32ebb98a0ca7cfc662f0901a0260cf06ae540
-        bytes: 942872192
+        file: jevos-v2-q8_0.gguf
+        sha256: c9f412118808004f6c15fab38a4fc94e940c8d5e74f5675974fddf822b598683
+        bytes: 942872256
       q4_k_m:
-        file: jevos-q4_k_m.gguf
-        sha256: 677d126a67d48a6ae965ce80973e7e68c7ab0b13b590a557d8f0cc29a178499f
-        bytes: 619289216
+        file: jevos-v2-q4_k_m.gguf
+        sha256: 3cbf010ce06cba932af73346ee683ee98d375dc284c029967eb418472a4993f3
+        bytes: 619289280
   gemma-4-e4b:
     source: google/gemma-4-E4B-it
     repo: bartowski/google_gemma-4-E4B-it-GGUF

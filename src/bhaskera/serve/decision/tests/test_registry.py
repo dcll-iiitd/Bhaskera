@@ -13,10 +13,10 @@ def test_repo_registry_pins_jevos_and_gemma():
     models = registry.load(REGISTRY)
     jevos = models["jevos"]
     assert jevos.files["q8_0"].sha256 == (
-        "7027cf624c518122b3b0913f67a32ebb98a0ca7cfc662f0901a0260cf06ae540"
+        "c9f412118808004f6c15fab38a4fc94e940c8d5e74f5675974fddf822b598683"
     )
     assert jevos.url("q4_k_m") == (
-        "https://github.com/feder-cr/jev/releases/download/jevos/jevos-q4_k_m.gguf"
+        "https://github.com/feder-cr/jev/releases/download/jevos-v2/jevos-v2-q4_k_m.gguf"
     )
     assert set(models["gemma-4-e4b"].files) == {"q8_0", "q4_k_m"}
 
