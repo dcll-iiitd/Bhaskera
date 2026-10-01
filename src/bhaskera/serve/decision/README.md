@@ -48,8 +48,11 @@ pass per question, reading the answer-token logits; nothing is generated. Ported
 ## Parity
 Gate (amended by the user, 2026-09-30): port fidelity, max |dP(yes)| <= 0.01 against upstream
 jev on the same device with the same branch strategy. Result: PASS, bit-identical (max 0.0, 0
-flips) for q8_0 and q4_k_m. CPU-vs-GPU and seq-copy-vs-state-restore drift are reported, not
-gated. Details: `benchmarks/decision/parity/REPORT.md`.
+flips) for q8_0 and q4_k_m. That PASS is Bhaskera with `branch: state-restore` versus upstream
+jev on CUDA (state-restore is upstream's own strategy for llama models). The default seq-copy
+path drifts up to 0.053 (q8_0) / 0.110 (q4_k_m) versus upstream CUDA, and batching at
+concurrency 16 drifts up to 0.052 versus unbatched; these, along with CPU-vs-GPU drift, are
+reported numbers, not gates. Details: `benchmarks/decision/parity/REPORT.md`.
 
 ## Benchmarks
 Results and the BEST_REPLICAS decision (8): `benchmarks/decision/results/SUMMARY.md`. Rerun on

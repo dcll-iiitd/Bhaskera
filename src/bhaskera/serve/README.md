@@ -108,7 +108,8 @@ curl localhost:PORT/v1/systemone -H 'Content-Type: application/json' -d '{
 
 Scaling: `num_replicas: N` with `ray_actor_options.num_gpus: auto` puts N llama.cpp contexts
 on one GPU; `serve.decision.batching.enabled` batches concurrent requests inside a replica
-(off by default: it did not pay off in the benchmarks). Measured results:
+(off by default: it won on 1 of 9 request sets, see the Phase B section of
+`benchmarks/decision/results/SUMMARY.md`). Measured results:
 `benchmarks/decision/results/SUMMARY.md`; parity with upstream jev:
 `benchmarks/decision/parity/REPORT.md`. The gateway also forwards `/v1/systemone` with API
 keys and per-question Langfuse traces; upstream failures map to 502. Calibrate with
