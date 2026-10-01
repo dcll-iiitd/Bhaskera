@@ -14,22 +14,26 @@ Observations (all at concurrency 64 unless noted):
 - State-restore branch at r8 vs seq-copy: bench_long_q3 52.1 vs 89.6 req/s (slower), bench_short_q1 188.8 vs 166.3 req/s (faster).
 - Gateway overhead at r8 (p50): bench_short_q1 +3.3 ms at concurrency 1 (29.1 vs 25.8), +39 ms at concurrency 64 (360 vs 321); bench_long_q3 at concurrency 64 indistinguishable (704 vs 710 ms).
 
-## bench_document_q1
+**Phase B (batching, r8, 36 rows `bhaskera-r8-batched`).** Decision rule: batching becomes the default only if `bhaskera-r8-batched` has higher req_per_s than `bhaskera-r8-q8_0` at concurrency 64 on at least 6 of the 9 request sets and its p90_ms is not worse on those sets. Result: it wins on 1 of 9 (bench_short_q1 only), so **batching stays off** (`serve.decision.batching.enabled` unchanged). Concurrency 64 per set:
 
-| label | requests | concurrency | completed | req_per_s | questions_per_s | p50_ms | p90_ms | p99_ms | errors | max_memory_mib | mean_util_pct |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| bhaskera-r1-q8_0 | bench_document_q1 | 1 | 214 | 14.3 | 14.3 | 70.2 | 72.3 | 74.1 | 0 | 1220.0 | 45.9 |
-| bhaskera-r1-q8_0 | bench_document_q1 | 4 | 247 | 16.5 | 16.5 | 244.2 | 248.4 | 250.6 | 0 | 1220.0 | 52.2 |
-| bhaskera-r1-q8_0 | bench_document_q1 | 16 | 238 | 15.9 | 15.9 | 1028.7 | 1130.9 | 1246.9 | 0 | 1220.0 | 54.2 |
-| bhaskera-r1-q8_0 | bench_document_q1 | 64 | 237 | 15.8 | 15.8 | 4518.2 | 5936.3 | 6230.0 | 0 | 1224.0 | 54.1 |
-| bhaskera-r2-q8_0 | bench_document_q1 | 1 | 209 | 13.9 | 13.9 | 71.5 | 74.4 | 76.5 | 0 | 2439.0 | 48.9 |
-| bhaskera-r2-q8_0 | bench_document_q1 | 4 | 394 | 26.3 | 26.3 | 153.3 | 159.7 | 188.9 | 0 | 2439.0 | 89.3 |
-| bhaskera-r2-q8_0 | bench_document_q1 | 16 | 374 | 24.9 | 24.9 | 632.8 | 716.5 | 816.7 | 0 | 2443.0 | 86.6 |
-| bhaskera-r2-q8_0 | bench_document_q1 | 64 | 387 | 25.8 | 25.8 | 2685.9 | 3831.8 | 4091.3 | 0 | 2443.0 | 93.6 |
-| bhaskera-r4-q8_0 | bench_document_q1 | 1 | 205 | 13.7 | 13.7 | 73.0 | 76.6 | 80.7 | 0 | 4866.0 | 46.2 |
-| bhaskera-r4-q8_0 | bench_document_q1 | 4 | 386 | 25.7 | 25.7 | 149.5 | 218.8 | 268.0 | 0 | 4870.0 | 92.0 |
-| bhaskera-r4-q8_0 | bench_document_q1 | 16 | 397 | 26.5 | 26.5 | 605.3 | 629.0 | 668.6 | 0 | 4882.0 | 99.7 |
-| bhaskera-r4-q8_0 | bench_document_q1 | 64 | 397 | 26.5 | 26.5 | 2455.6 | 2574.1 | 2706.4 | 0 | 4882.0 | 98.4 |
+| request set | unbatched req/s | batched req/s | unbatched p90 ms | batched p90 ms | wins |
+|---|---|---|---|---|---|
+| bench_document_q1 | 26.4 | 25.9 | 2513 | 2553 | no |
+| bench_document_q10 | 18.1 | 18.4 | 3924 | 3933 | no |
+| bench_document_q3 | 24.1 | 23.1 | 2876 | 3062 | no |
+| bench_long_q1 | 141.7 | 119.1 | 661 | 572 | no |
+| bench_long_q10 | 46.1 | 41.0 | 1491 | 1704 | no |
+| bench_long_q3 | 89.6 | 79.9 | 919 | 847 | no |
+| bench_short_q1 | 166.3 | 171.6 | 587 | 409 | yes |
+| bench_short_q10 | 53.1 | 49.6 | 1267 | 1372 | no |
+| bench_short_q3 | 115.9 | 99.9 | 801 | 680 | no |
+
+Count: 1 of 9 (needs 6). Batching drift vs unbatched (reported, not gated): at concurrency 16 max |dP(yes)| 0.0517, mean 0.0029, 4 of 1100 decisions flipped; at concurrency 1 bit-identical.
+
+| bhaskera-r8-batched | bench_document_q1 | 1 | 184 | 12.3 | 12.3 | 81.2 | 83.4 | 87.3 | 0 | 17797.0 | 43.4 |
+| bhaskera-r8-batched | bench_document_q1 | 4 | 382 | 25.5 | 25.5 | 156.4 | 185.0 | 259.0 | 0 | 17805.0 | 92.6 |
+| bhaskera-r8-batched | bench_document_q1 | 16 | 387 | 25.8 | 25.8 | 612.0 | 864.8 | 1019.1 | 0 | 17813.0 | 99.6 |
+| bhaskera-r8-batched | bench_document_q1 | 64 | 388 | 25.9 | 25.9 | 2494.4 | 2552.5 | 2611.7 | 0 | 17817.0 | 100.0 |
 | bhaskera-r8-gateway | bench_document_q1 | 1 | 191 | 12.7 | 12.7 | 78.3 | 82.5 | 89.1 | 0 | 9729.0 | 47.8 |
 | bhaskera-r8-gateway | bench_document_q1 | 4 | 396 | 26.4 | 26.4 | 151.6 | 173.6 | 236.2 | 0 | 9737.0 | 95.2 |
 | bhaskera-r8-gateway | bench_document_q1 | 16 | 398 | 26.5 | 26.5 | 595.6 | 854.4 | 1052.7 | 0 | 9745.0 | 99.9 |
@@ -75,6 +79,10 @@ Observations (all at concurrency 64 unless noted):
 | bhaskera-r4-q8_0 | bench_document_q10 | 4 | 204 | 13.6 | 136.0 | 263.1 | 478.8 | 540.7 | 0 | 4866.0 | 70.4 |
 | bhaskera-r4-q8_0 | bench_document_q10 | 16 | 223 | 14.9 | 148.7 | 1127.0 | 1225.8 | 1255.9 | 0 | 4866.0 | 74.6 |
 | bhaskera-r4-q8_0 | bench_document_q10 | 64 | 208 | 13.9 | 138.7 | 4731.5 | 5082.3 | 5355.3 | 0 | 4866.0 | 68.4 |
+| bhaskera-r8-batched | bench_document_q10 | 1 | 83 | 5.5 | 55.3 | 177.2 | 199.9 | 221.3 | 0 | 17793.0 | 24.5 |
+| bhaskera-r8-batched | bench_document_q10 | 4 | 211 | 14.1 | 140.7 | 290.0 | 323.0 | 509.4 | 0 | 17793.0 | 67.0 |
+| bhaskera-r8-batched | bench_document_q10 | 16 | 282 | 18.8 | 188.0 | 873.2 | 1228.9 | 1442.3 | 0 | 17793.0 | 95.8 |
+| bhaskera-r8-batched | bench_document_q10 | 64 | 276 | 18.4 | 184.0 | 3497.0 | 3933.0 | 4009.1 | 0 | 17797.0 | 99.6 |
 | bhaskera-r8-gateway | bench_document_q10 | 1 | 86 | 5.7 | 57.3 | 171.6 | 190.1 | 199.1 | 0 | 9729.0 | 30.4 |
 | bhaskera-r8-gateway | bench_document_q10 | 4 | 214 | 14.3 | 142.7 | 279.8 | 328.3 | 544.4 | 0 | 9729.0 | 67.6 |
 | bhaskera-r8-gateway | bench_document_q10 | 16 | 262 | 17.5 | 174.7 | 932.4 | 1371.2 | 1537.2 | 0 | 9729.0 | 92.6 |
@@ -120,6 +128,10 @@ Observations (all at concurrency 64 unless noted):
 | bhaskera-r4-q8_0 | bench_document_q3 | 4 | 295 | 19.7 | 59.0 | 188.7 | 299.9 | 351.2 | 0 | 4882.0 | 81.3 |
 | bhaskera-r4-q8_0 | bench_document_q3 | 16 | 347 | 23.1 | 69.4 | 676.5 | 794.9 | 849.4 | 0 | 4882.0 | 89.3 |
 | bhaskera-r4-q8_0 | bench_document_q3 | 64 | 345 | 23.0 | 69.0 | 2871.1 | 3091.3 | 3258.4 | 0 | 4882.0 | 94.6 |
+| bhaskera-r8-batched | bench_document_q3 | 1 | 121 | 8.1 | 24.2 | 124.7 | 128.7 | 135.3 | 0 | 17821.0 | 37.4 |
+| bhaskera-r8-batched | bench_document_q3 | 4 | 297 | 19.8 | 59.4 | 209.1 | 235.3 | 367.0 | 0 | 17825.0 | 78.6 |
+| bhaskera-r8-batched | bench_document_q3 | 16 | 346 | 23.1 | 69.2 | 695.9 | 980.5 | 1104.2 | 0 | 17825.0 | 99.9 |
+| bhaskera-r8-batched | bench_document_q3 | 64 | 347 | 23.1 | 69.4 | 2748.5 | 3062.1 | 3104.3 | 0 | 17825.0 | 97.9 |
 | bhaskera-r8-gateway | bench_document_q3 | 1 | 123 | 8.2 | 24.6 | 121.5 | 127.3 | 132.9 | 0 | 9761.0 | 32.5 |
 | bhaskera-r8-gateway | bench_document_q3 | 4 | 309 | 20.6 | 61.8 | 194.9 | 234.2 | 354.3 | 0 | 9761.0 | 76.0 |
 | bhaskera-r8-gateway | bench_document_q3 | 16 | 360 | 24.0 | 72.0 | 675.2 | 1026.4 | 1212.2 | 0 | 9761.0 | 97.6 |
@@ -165,6 +177,10 @@ Observations (all at concurrency 64 unless noted):
 | bhaskera-r4-q8_0 | bench_long_q1 | 4 | 1708 | 113.9 | 113.9 | 33.3 | 45.1 | 55.4 | 0 | 4898.0 | 74.0 |
 | bhaskera-r4-q8_0 | bench_long_q1 | 16 | 2142 | 142.8 | 142.8 | 112.2 | 121.1 | 129.9 | 0 | 4898.0 | 97.8 |
 | bhaskera-r4-q8_0 | bench_long_q1 | 64 | 2089 | 139.3 | 139.3 | 412.3 | 746.8 | 1018.9 | 0 | 4898.0 | 96.4 |
+| bhaskera-r8-batched | bench_long_q1 | 1 | 395 | 26.3 | 26.3 | 38.2 | 39.8 | 43.7 | 0 | 17857.0 | 21.7 |
+| bhaskera-r8-batched | bench_long_q1 | 4 | 1424 | 94.9 | 94.9 | 41.2 | 46.9 | 60.8 | 0 | 17857.0 | 72.8 |
+| bhaskera-r8-batched | bench_long_q1 | 16 | 1841 | 122.7 | 122.7 | 128.3 | 178.7 | 213.2 | 0 | 17857.0 | 98.8 |
+| bhaskera-r8-batched | bench_long_q1 | 64 | 1787 | 119.1 | 119.1 | 542.4 | 571.6 | 597.6 | 0 | 17857.0 | 100.0 |
 | bhaskera-r8-gateway | bench_long_q1 | 1 | 445 | 29.7 | 29.7 | 33.7 | 36.0 | 38.5 | 0 | 9793.0 | 21.2 |
 | bhaskera-r8-gateway | bench_long_q1 | 4 | 1642 | 109.5 | 109.5 | 35.8 | 40.0 | 52.3 | 0 | 9793.0 | 71.1 |
 | bhaskera-r8-gateway | bench_long_q1 | 16 | 2124 | 141.6 | 141.6 | 111.1 | 155.1 | 187.5 | 0 | 9793.0 | 99.0 |
@@ -210,6 +226,10 @@ Observations (all at concurrency 64 unless noted):
 | bhaskera-r4-q8_0 | bench_long_q10 | 4 | 388 | 25.9 | 258.7 | 137.9 | 231.6 | 275.3 | 0 | 4898.0 | 50.7 |
 | bhaskera-r4-q8_0 | bench_long_q10 | 16 | 499 | 33.3 | 332.7 | 479.8 | 523.8 | 555.4 | 0 | 4898.0 | 65.8 |
 | bhaskera-r4-q8_0 | bench_long_q10 | 64 | 483 | 32.2 | 322.0 | 2023.4 | 2124.0 | 2195.1 | 0 | 4898.0 | 66.4 |
+| bhaskera-r8-batched | bench_long_q10 | 1 | 131 | 8.7 | 87.3 | 114.8 | 124.3 | 132.0 | 0 | 17849.0 | 21.0 |
+| bhaskera-r8-batched | bench_long_q10 | 4 | 431 | 28.7 | 287.3 | 137.2 | 160.3 | 253.1 | 0 | 17853.0 | 60.7 |
+| bhaskera-r8-batched | bench_long_q10 | 16 | 619 | 41.3 | 412.7 | 391.0 | 552.6 | 680.2 | 0 | 17857.0 | 92.4 |
+| bhaskera-r8-batched | bench_long_q10 | 64 | 615 | 41.0 | 410.0 | 1602.9 | 1704.1 | 1848.5 | 0 | 17857.0 | 94.8 |
 | bhaskera-r8-gateway | bench_long_q10 | 1 | 122 | 8.1 | 81.3 | 123.9 | 128.3 | 134.0 | 0 | 9769.0 | 21.6 |
 | bhaskera-r8-gateway | bench_long_q10 | 4 | 431 | 28.7 | 287.3 | 137.3 | 163.5 | 245.5 | 0 | 9789.0 | 53.1 |
 | bhaskera-r8-gateway | bench_long_q10 | 16 | 687 | 45.8 | 458.0 | 346.1 | 480.4 | 588.0 | 0 | 9793.0 | 94.3 |
@@ -255,6 +275,10 @@ Observations (all at concurrency 64 unless noted):
 | bhaskera-r4-q8_0 | bench_long_q3 | 4 | 856 | 57.1 | 171.2 | 65.3 | 96.0 | 120.1 | 0 | 4898.0 | 60.9 |
 | bhaskera-r4-q8_0 | bench_long_q3 | 16 | 1170 | 78.0 | 234.0 | 204.5 | 220.8 | 238.9 | 0 | 4898.0 | 82.0 |
 | bhaskera-r4-q8_0 | bench_long_q3 | 64 | 1124 | 74.9 | 224.8 | 863.3 | 1345.5 | 1670.2 | 0 | 4898.0 | 78.9 |
+| bhaskera-r8-batched | bench_long_q3 | 1 | 233 | 15.5 | 46.6 | 64.1 | 66.8 | 71.2 | 0 | 17857.0 | 21.5 |
+| bhaskera-r8-batched | bench_long_q3 | 4 | 801 | 53.4 | 160.2 | 72.4 | 87.6 | 111.9 | 0 | 17857.0 | 62.9 |
+| bhaskera-r8-batched | bench_long_q3 | 16 | 1206 | 80.4 | 241.2 | 198.5 | 273.9 | 324.4 | 0 | 17857.0 | 97.3 |
+| bhaskera-r8-batched | bench_long_q3 | 64 | 1198 | 79.9 | 239.6 | 808.1 | 846.7 | 882.8 | 0 | 17857.0 | 100.0 |
 | bhaskera-r8-gateway | bench_long_q3 | 1 | 254 | 16.9 | 50.8 | 58.8 | 61.8 | 66.3 | 0 | 9793.0 | 22.3 |
 | bhaskera-r8-gateway | bench_long_q3 | 4 | 889 | 59.3 | 177.8 | 65.4 | 77.9 | 109.1 | 0 | 9793.0 | 58.2 |
 | bhaskera-r8-gateway | bench_long_q3 | 16 | 1341 | 89.4 | 268.2 | 178.3 | 245.7 | 293.1 | 0 | 9793.0 | 97.9 |
@@ -300,6 +324,10 @@ Observations (all at concurrency 64 unless noted):
 | bhaskera-r4-q8_0 | bench_short_q1 | 4 | 2042 | 136.1 | 136.1 | 28.1 | 36.2 | 45.4 | 0 | 4898.0 | 55.0 |
 | bhaskera-r4-q8_0 | bench_short_q1 | 16 | 2996 | 199.7 | 199.7 | 80.4 | 94.7 | 107.1 | 0 | 4898.0 | 87.6 |
 | bhaskera-r4-q8_0 | bench_short_q1 | 64 | 2531 | 168.7 | 168.7 | 355.2 | 603.1 | 847.9 | 0 | 4898.0 | 76.1 |
+| bhaskera-r8-batched | bench_short_q1 | 1 | 437 | 29.1 | 29.1 | 34.3 | 36.0 | 38.8 | 0 | 17857.0 | 20.6 |
+| bhaskera-r8-batched | bench_short_q1 | 4 | 1588 | 105.9 | 105.9 | 37.0 | 43.1 | 52.4 | 0 | 17857.0 | 56.4 |
+| bhaskera-r8-batched | bench_short_q1 | 16 | 2656 | 177.1 | 177.1 | 88.2 | 120.0 | 143.4 | 0 | 17857.0 | 97.2 |
+| bhaskera-r8-batched | bench_short_q1 | 64 | 2574 | 171.6 | 171.6 | 378.9 | 409.1 | 428.7 | 0 | 17857.0 | 100.0 |
 | bhaskera-r8-gateway | bench_short_q1 | 1 | 515 | 34.3 | 34.3 | 29.1 | 31.2 | 34.6 | 0 | 9793.0 | 19.9 |
 | bhaskera-r8-gateway | bench_short_q1 | 4 | 1836 | 122.4 | 122.4 | 31.9 | 36.5 | 46.9 | 0 | 9793.0 | 49.1 |
 | bhaskera-r8-gateway | bench_short_q1 | 16 | 3103 | 206.9 | 206.9 | 74.2 | 97.6 | 126.1 | 0 | 9793.0 | 95.1 |
@@ -345,6 +373,10 @@ Observations (all at concurrency 64 unless noted):
 | bhaskera-r4-q8_0 | bench_short_q10 | 4 | 434 | 28.9 | 289.3 | 127.0 | 204.8 | 249.8 | 0 | 4898.0 | 47.3 |
 | bhaskera-r4-q8_0 | bench_short_q10 | 16 | 561 | 37.4 | 374.0 | 425.9 | 460.0 | 500.1 | 0 | 4898.0 | 61.3 |
 | bhaskera-r4-q8_0 | bench_short_q10 | 64 | 535 | 35.7 | 356.7 | 1833.3 | 1953.9 | 2083.4 | 0 | 4898.0 | 63.0 |
+| bhaskera-r8-batched | bench_short_q10 | 1 | 133 | 8.9 | 88.7 | 110.6 | 123.3 | 126.9 | 0 | 17857.0 | 22.1 |
+| bhaskera-r8-batched | bench_short_q10 | 4 | 478 | 31.9 | 318.7 | 122.2 | 146.5 | 198.0 | 0 | 17857.0 | 55.6 |
+| bhaskera-r8-batched | bench_short_q10 | 16 | 734 | 48.9 | 489.3 | 323.9 | 445.9 | 545.5 | 0 | 17857.0 | 98.0 |
+| bhaskera-r8-batched | bench_short_q10 | 64 | 744 | 49.6 | 496.0 | 1299.7 | 1371.7 | 1432.9 | 0 | 17857.0 | 94.7 |
 | bhaskera-r8-gateway | bench_short_q10 | 1 | 140 | 9.3 | 93.3 | 103.8 | 117.3 | 122.8 | 0 | 9793.0 | 18.8 |
 | bhaskera-r8-gateway | bench_short_q10 | 4 | 494 | 32.9 | 329.3 | 116.3 | 142.8 | 230.3 | 0 | 9793.0 | 54.2 |
 | bhaskera-r8-gateway | bench_short_q10 | 16 | 791 | 52.7 | 527.3 | 301.0 | 424.5 | 501.7 | 0 | 9793.0 | 96.6 |
@@ -390,6 +422,10 @@ Observations (all at concurrency 64 unless noted):
 | bhaskera-r4-q8_0 | bench_short_q3 | 4 | 1028 | 68.5 | 205.6 | 53.6 | 80.0 | 93.6 | 0 | 4898.0 | 52.5 |
 | bhaskera-r4-q8_0 | bench_short_q3 | 16 | 1409 | 93.9 | 281.8 | 170.6 | 184.7 | 197.1 | 0 | 4898.0 | 74.8 |
 | bhaskera-r4-q8_0 | bench_short_q3 | 64 | 1345 | 89.7 | 269.0 | 715.6 | 1147.9 | 1475.0 | 0 | 4898.0 | 74.0 |
+| bhaskera-r8-batched | bench_short_q3 | 1 | 264 | 17.6 | 52.8 | 56.7 | 59.3 | 63.9 | 0 | 17857.0 | 14.1 |
+| bhaskera-r8-batched | bench_short_q3 | 4 | 915 | 61.0 | 183.0 | 63.1 | 77.8 | 101.6 | 0 | 17857.0 | 56.0 |
+| bhaskera-r8-batched | bench_short_q3 | 16 | 1526 | 101.7 | 305.2 | 157.3 | 215.0 | 255.9 | 0 | 17857.0 | 96.8 |
+| bhaskera-r8-batched | bench_short_q3 | 64 | 1499 | 99.9 | 299.8 | 650.3 | 679.8 | 704.3 | 0 | 17857.0 | 100.0 |
 | bhaskera-r8-gateway | bench_short_q3 | 1 | 287 | 19.1 | 57.4 | 52.2 | 55.5 | 60.1 | 0 | 9793.0 | 16.9 |
 | bhaskera-r8-gateway | bench_short_q3 | 4 | 1037 | 69.1 | 207.4 | 56.6 | 65.9 | 89.1 | 0 | 9793.0 | 50.0 |
 | bhaskera-r8-gateway | bench_short_q3 | 16 | 1745 | 116.3 | 349.0 | 136.2 | 189.1 | 226.6 | 0 | 9793.0 | 97.0 |
