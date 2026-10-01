@@ -7,6 +7,7 @@ from threading import Lock
 
 from .decisions import candidates, decode
 from .prompts import BINARY_PROMPT_VERSION, compile_request
+from .runtime.llama_cpp import LlamaRuntimeError
 from .schema import Request
 
 
@@ -55,7 +56,7 @@ class Engine:
         """Several requests scored together in shared llama_decode calls (seq-copy only).
 
         Returns one entry per request, in order: the dict `decide` returns, or the ValueError
-        that request alone raised; a bad request never fails its neighbours. Every request
+        that request alone raised (a LlamaRuntimeError fails its whole chunk); a bad request never fails its neighbours. Every request
         shares its state prefix, whatever its `mode`. Requests are scored in chunks of at most
         the backend's `max_requests`; a scoring error fails only its chunk.
         """
@@ -83,7 +84,7 @@ class Engine:
                     scored, timing = self._worker.submit(
                         self.backend.score_many, [(prefix, jobs) for _, _, prefix, jobs in chunk]
                     ).result()
-                except ValueError as error:
+                except (ValueError, LlamaRuntimeError) as error:
                     for index, *_ in chunk:
                         outcomes[index] = error
                     continue

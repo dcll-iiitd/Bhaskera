@@ -38,6 +38,11 @@ FLASH_ATTN_ENABLED = 1  # enum llama_flash_attn_type
 LOG_LEVEL_WARN, LOG_LEVEL_ERROR = 3, 4
 
 
+class LlamaRuntimeError(RuntimeError):
+    """llama.cpp failed (decode, logits, state, model or context load): a server fault, not a
+    bad request, so the API answers 500 where it answers 422 to a ValueError."""
+
+
 class ModelParams(ctypes.Structure):
     _fields_ = [
         ("devices", POINTER(c_void_p)),
@@ -358,7 +363,7 @@ class Session:
         model_params.n_gpu_layers = (GPU_LAYERS if gpu_layers is None else gpu_layers) if chosen else 0
         model = library.llama_model_load_from_file(str(gguf).encode(), model_params)
         if not model:
-            raise ValueError(f"llama.cpp cannot load {gguf}")
+            raise LlamaRuntimeError(f"llama.cpp cannot load {gguf}")
         params = library.llama_context_default_params()
         params.n_ctx = n_ctx
         params.n_batch = min(n_batch, n_ctx)
@@ -384,7 +389,7 @@ class Session:
         context = library.llama_init_from_model(model, params)
         if not context:
             library.llama_model_free(model)
-            raise ValueError(
+            raise LlamaRuntimeError(
                 f"llama.cpp cannot create a {n_ctx}-token context; lower --ctx or --batch-size"
             )
         return cls(
@@ -480,20 +485,20 @@ class Session:
         status = self.library.llama_decode(self.context, batch)
         if status != 0:
             reason = "the context is full" if status == 1 else "compute error"
-            raise ValueError(f"llama_decode returned {status}: {reason}")
+            raise LlamaRuntimeError(f"llama_decode returned {status}: {reason}")
 
     def logits(self, index: int, slots: list[int]) -> list[float]:
         """Logits of the given vocabulary rows at batch position `index`."""
         row = self.library.llama_get_logits_ith(self.context, index)
         if not row:
-            raise ValueError(f"No logits were produced at batch position {index}")
+            raise LlamaRuntimeError(f"No logits were produced at batch position {index}")
         return [float(row[slot]) for slot in slots]
 
     def logits_all(self, index: int) -> list[float]:
         """The whole vocabulary row at batch position `index` (diagnostics, not scoring)."""
         row = self.library.llama_get_logits_ith(self.context, index)
         if not row:
-            raise ValueError(f"No logits were produced at batch position {index}")
+            raise LlamaRuntimeError(f"No logits were produced at batch position {index}")
         return row[: self.vocab_size]
 
     def clear(self) -> None:
@@ -510,11 +515,11 @@ class Session:
         """Serialize the whole state of one sequence; the branching path for hybrid models."""
         size = self.library.llama_state_seq_get_size(self.context, sequence)
         if size <= 0:
-            raise ValueError(f"llama.cpp reports an empty state for sequence {sequence}")
+            raise LlamaRuntimeError(f"llama.cpp reports an empty state for sequence {sequence}")
         buffer = (c_uint8 * size)()
         written = self.library.llama_state_seq_get_data(self.context, buffer, size, sequence)
         if written != size:
-            raise ValueError(f"llama.cpp wrote {written} of {size} state bytes")
+            raise LlamaRuntimeError(f"llama.cpp wrote {written} of {size} state bytes")
         return buffer
 
     def restore_sequence(self, state, sequence: int = 0) -> None:
@@ -522,7 +527,7 @@ class Session:
         self.library.llama_memory_seq_rm(self.memory, sequence, -1, -1)
         read = self.library.llama_state_seq_set_data(self.context, state, len(state), sequence)
         if read == 0:
-            raise ValueError(f"llama.cpp could not restore the saved state of sequence {sequence}")
+            raise LlamaRuntimeError(f"llama.cpp could not restore the saved state of sequence {sequence}")
 
     def synchronize(self) -> None:
         self.library.llama_synchronize(self.context)
