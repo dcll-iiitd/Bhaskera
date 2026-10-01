@@ -67,3 +67,10 @@ def test_table_renders_markdown():
     text = bt.table(rows)
     assert text.splitlines()[0].startswith("| label |")
     assert "| x | bench_short_q1 | 4 | 180 | 12.3 |" in text
+
+
+def test_compare_does_not_pass_without_any_answers():
+    rows = [{"id": "r1", "status": 422, "response": None}]
+    result = bt.compare(rows, list(rows))
+    assert result["answers"] == 0
+    assert result["passed"] is False

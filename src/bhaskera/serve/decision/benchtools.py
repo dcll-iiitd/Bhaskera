@@ -192,7 +192,7 @@ def compare(reference: list[dict], candidate: list[dict], tolerance: float = 0.0
         "missing": missing,
         "status_mismatch": mismatched,
         "tolerance": tolerance,
-        "passed": not missing and not mismatched and worst <= tolerance,
+        "passed": bool(deltas) and not missing and not mismatched and worst <= tolerance,
     }
 
 
