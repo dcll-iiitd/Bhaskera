@@ -7,12 +7,15 @@ GGUF and the pinned llama.cpp runtime and rewrites the config with absolute path
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import registry
 from .runtime import llama_release
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from bhaskera.config import Config
@@ -45,6 +48,27 @@ def provision(cfg: "Config", progress=None) -> None:
         runtime.runtime_dir = str(library.parent.resolve())
 
 
+def batching_supported(engine: "Engine") -> bool:
+    """Whether this replica may batch across requests (`Engine.decide_many`).
+
+    Batching needs the seq-copy branch strategy *and* a clean branch probe. The backend loads
+    with the configured branch, so `auto` still falls back to state-restore when the probe
+    drifts; a replica that ended up there (or whose explicit seq-copy probed above tolerance)
+    keeps serving through plain `decide`.
+    """
+    from .backend import BRANCH_TOLERANCE
+
+    backend = engine.backend
+    delta = backend.metadata.get("probe_branch_max_delta")
+    if backend.branch != "seq-copy":
+        logger.warning("batching disabled: branch strategy resolved to %s, not seq-copy", backend.branch)
+        return False
+    if delta is not None and delta > BRANCH_TOLERANCE:
+        logger.warning("batching disabled: branch probe drift %.3f exceeds %.2f", delta, BRANCH_TOLERANCE)
+        return False
+    return True
+
+
 def load_engine(cfg: "Config") -> "Engine":
     from .backend import LlamaBackend
     from .calibration import Calibration
@@ -59,7 +83,7 @@ def load_engine(cfg: "Config") -> "Engine":
         batch_size=decision.batch_size,
         prefill_chunk=decision.prefill_chunk,
         runtime_dir=decision.llama_cpp.runtime_dir,
-        branch="seq-copy" if decision.batching.enabled else decision.branch,
+        branch=decision.branch,
         max_requests=decision.batching.max_batch_size if decision.batching.enabled else 1,
         identify=lambda sha256: registry.identify(sha256, models),
     )

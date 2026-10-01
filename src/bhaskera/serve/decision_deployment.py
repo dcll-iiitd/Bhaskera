@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from ray import serve
 
 from .decision import service, wire
+from .decision.runtime.llama_cpp import LlamaRuntimeError
 from .decision.translate import served_name
 
 if TYPE_CHECKING:
@@ -40,11 +41,18 @@ async def _unprocessable(_: HTTPRequest, error: ValueError):
     return JSONResponse(status_code=422, content={"detail": service.error_detail(error)})
 
 
+@_decision_app.exception_handler(LlamaRuntimeError)
+async def _backend_fault(_: HTTPRequest, error: LlamaRuntimeError):
+    # llama.cpp failed (decode, logits, state): the server's fault, not the request's.
+    logger.error("decision backend error: %s", error)
+    return JSONResponse(status_code=500, content={"detail": f"decision backend error: {error}"})
+
+
 @serve.deployment
 @serve.ingress(_decision_app)
 class DecisionDeployment:
     def __init__(self, cfg: "Config") -> None:
-        from .decision.loader import load_engine
+        from .decision.loader import batching_supported, load_engine
 
         self._engine = load_engine(cfg)
         self._served = served_name(self._engine.backend.metadata)
@@ -56,14 +64,14 @@ class DecisionDeployment:
             meta.get("probe_branch_max_delta"),
         )
         batching = cfg.serve.decision.batching
-        self._batching = batching.enabled
+        self._batching = batching.enabled and batching_supported(self._engine)
         if self._batching:
             self._decide_batch.set_max_batch_size(batching.max_batch_size)
             self._decide_batch.set_batch_wait_timeout_s(batching.batch_wait_timeout_s)
 
     @serve.batch(max_batch_size=8, batch_wait_timeout_s=0.005)
     async def _decide_batch(self, natives: list) -> list:
-        # One entry per request: a result dict or the ValueError that request raised.
+        # One entry per request: a result dict or the exception that request raised.
         return await asyncio.to_thread(self._engine.decide_many, natives)
 
     async def _decide(self, native):
