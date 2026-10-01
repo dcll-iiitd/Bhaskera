@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from bhaskera.config import Config
@@ -70,3 +72,74 @@ def test_batching_raises_max_ongoing_requests():
     cfg.serve.decision.batching.enabled = True
     cfg.serve.decision.batching.max_batch_size = 16
     assert decision_options(cfg)["max_ongoing_requests"] == 16
+
+
+def test_error_handlers_map_value_error_to_422_and_runtime_fault_to_500():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from bhaskera.serve import decision_deployment as dd
+    from bhaskera.serve.decision.runtime.llama_cpp import LlamaRuntimeError
+
+    app = FastAPI()
+    for exc, handler in dd._decision_app.exception_handlers.items():
+        app.add_exception_handler(exc, handler)
+
+    @app.get("/bad")
+    async def bad():
+        raise ValueError("prompt too long")
+
+    @app.get("/fault")
+    async def fault():
+        raise LlamaRuntimeError("llama_decode returned -1")
+
+    client = TestClient(app, raise_server_exceptions=False)
+    assert client.get("/bad").status_code == 422
+    response = client.get("/fault")
+    assert response.status_code == 500
+    assert response.json() == {"detail": "decision backend error: llama_decode returned -1"}
+
+
+class _Backend:
+    def __init__(self, branch, delta):
+        self.branch = branch
+        self.metadata = {
+            "model": "jevos", "precision": "q8_0", "branch_strategy": branch,
+            "probe_branch_max_delta": delta,
+        }
+
+
+class _Engine:
+    def __init__(self, branch, delta=0.0):
+        self.backend = _Backend(branch, delta)
+
+
+def _replica(monkeypatch, branch, delta):
+    from bhaskera.serve import decision_deployment as dd
+    from bhaskera.serve.decision import loader
+
+    monkeypatch.setattr(loader, "load_engine", lambda cfg: _Engine(branch, delta))
+    cfg = _cfg(1, 0)
+    cfg.serve.decision.batching.enabled = True
+    cls = dd.DecisionDeployment.func_or_class
+    replica = object.__new__(cls)
+    asyncio.run(cls.__init__(replica, cfg))  # serve.ingress wraps __init__ as a coroutine
+    return replica
+
+
+@pytest.mark.filterwarnings("ignore:coroutine .*never awaited:RuntimeWarning")
+def test_batching_stays_on_for_a_verified_seq_copy_backend(monkeypatch):
+    assert _replica(monkeypatch, "seq-copy", 0.0)._batching is True
+
+
+@pytest.mark.filterwarnings("ignore:coroutine .*never awaited:RuntimeWarning")
+def test_batching_is_disabled_when_the_probe_fell_back_to_state_restore(monkeypatch, caplog):
+    with caplog.at_level("WARNING"):
+        replica = _replica(monkeypatch, "state-restore", None)
+    assert replica._batching is False
+    assert "batching disabled" in caplog.text
+
+
+@pytest.mark.filterwarnings("ignore:coroutine .*never awaited:RuntimeWarning")
+def test_batching_is_disabled_when_the_branch_probe_drifts(monkeypatch):
+    assert _replica(monkeypatch, "seq-copy", 0.2)._batching is False

@@ -174,3 +174,48 @@ def test_decide_many_chunks_to_the_backend_capacity():
     out = engine.decide_many([_boolean(q, state=f"s{q}") for q in "abc"])
     assert all(isinstance(o, dict) for o in out)
     assert backend.many_calls == [2, 1]
+
+
+def test_decide_many_runtime_fault_fails_only_its_chunk():
+    from bhaskera.serve.decision.runtime.llama_cpp import LlamaRuntimeError
+
+    backend = FakeBackend({q: [0.0, math.log(4.0)] for q in "abc"})
+    backend.max_requests = 2
+    real = backend.score_many
+
+    def flaky(requests):
+        if not backend.many_calls:
+            backend.many_calls.append(len(requests))
+            raise LlamaRuntimeError("llama_decode returned -1: compute error")
+        return real(requests)
+
+    backend.score_many = flaky
+    engine = Engine(backend, binary=True)
+    out = engine.decide_many([_boolean(q, state=f"s{q}") for q in "abc"])
+    assert isinstance(out[0], LlamaRuntimeError) and isinstance(out[1], LlamaRuntimeError)
+    assert not isinstance(out[0], ValueError)
+    assert isinstance(out[2], dict)
+
+
+def test_load_engine_uses_the_configured_branch_even_when_batching(monkeypatch, tmp_path):
+    from bhaskera.config import Config
+    from bhaskera.serve.decision import backend as backend_module
+    from bhaskera.serve.decision import loader
+
+    seen = {}
+
+    def fake_load(path, **kwargs):
+        seen.update(kwargs)
+        backend = FakeBackend({})
+        backend.metadata["branch_strategy"] = "state-restore"
+        return backend
+
+    monkeypatch.setattr(backend_module.LlamaBackend, "load", staticmethod(fake_load))
+    cfg = Config()
+    cfg.model.gguf = "x.gguf"
+    cfg.serve.decision.registry = "configs/models/gguf.yaml"
+    cfg.serve.decision.batching.enabled = True
+    cfg.serve.decision.batching.max_batch_size = 6
+    loader.load_engine(cfg)
+    assert seen["branch"] == cfg.serve.decision.branch == "auto"
+    assert seen["max_requests"] == 6
