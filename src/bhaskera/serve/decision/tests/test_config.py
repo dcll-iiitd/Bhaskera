@@ -48,3 +48,8 @@ def test_shipped_decision_configs_load():
     assert jevos.serve.gateway.cloudflared is False
     gemma = load_config(str(ROOT / "configs" / "serve_gemma_decision.yaml"))
     assert gemma.model.gguf == "gemma-4-e4b-q8_0"
+
+
+def test_shipped_decision_configs_bind_loopback():
+    for name in ("serve_jevos", "serve_gemma_decision"):
+        assert load_config(str(ROOT / "configs" / f"{name}.yaml")).serve.host == "127.0.0.1"

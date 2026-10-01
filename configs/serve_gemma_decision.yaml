@@ -12,6 +12,9 @@ serve:
   num_replicas: 1
   ray_actor_options:
     num_gpus: auto     # auto = 1 / num_replicas: every replica shares one GPU
+  # Unauthenticated API: bind loopback only. Use the gateway for authenticated external
+  # access; set host: 0.0.0.0 only on a trusted network.
+  host: 127.0.0.1
   port: 0
   decision:
     registry: configs/models/gguf.yaml

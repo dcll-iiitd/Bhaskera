@@ -12,6 +12,9 @@ serve:
   num_replicas: 1
   ray_actor_options:
     num_gpus: auto     # auto = 1 / num_replicas: every replica shares one GPU
+  # Unauthenticated API: bind loopback only. Use the gateway for authenticated external
+  # access; set host: 0.0.0.0 only on a trusted network.
+  host: 127.0.0.1
   port: 0
   decision:
     registry: configs/models/gguf.yaml
@@ -20,6 +23,10 @@ serve:
     ctx: 8192
     batch_size: 4
     prefill_chunk: 512
+    # auto resolves to seq-copy for jevos (faster on multi-question requests; answers drift up to
+    # 0.053 (q8_0) from upstream jev on the same GPU). state-restore gives upstream-identical
+    # answers and is faster on short single-question requests (188.8 vs 166.3 req/s on
+    # bench_short_q1) but slower on long multi-question ones (52.1 vs 89.6 req/s on bench_long_q3).
     branch: auto
     calibration: null
     max_ongoing_requests: 4
