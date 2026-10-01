@@ -1,6 +1,6 @@
 # Decision serving, Phase A (one RTX A6000, GPU 0)
 
-Date 2026-09-30. Host: AMD EPYC 7282, RTX A6000 (GPU 0 only), llama.cpp release b11081 (pinned). Closed-loop load, 15 s per level after 3 s warmup, concurrency 1/4/16/64. 360 rows, 0 errors.
+Date 2026-09-30. Host: AMD EPYC 7282, RTX A6000 (GPU 0 only), llama.cpp release b11081 (pinned). Closed-loop load, 15 s per level after 3 s warmup, concurrency 1/4/16/64. 396 rows (360 Phase A + 36 batched), 0 errors.
 
 **BEST_REPLICAS = 8**, decided by `bench_long_q3` at concurrency 64: r1 18.7, r2 38.4, r4 74.9, r8 89.6 req/s (r8 highest; ties would go to fewer replicas, none tied).
 
@@ -14,7 +14,7 @@ Observations (all at concurrency 64 unless noted):
 - State-restore branch at r8 vs seq-copy: bench_long_q3 52.1 vs 89.6 req/s (slower), bench_short_q1 188.8 vs 166.3 req/s (faster).
 - Gateway overhead at r8 (p50): bench_short_q1 +3.3 ms at concurrency 1 (29.1 vs 25.8), +39 ms at concurrency 64 (360 vs 321); bench_long_q3 at concurrency 64 indistinguishable (704 vs 710 ms).
 
-**Phase B (batching, r8, 36 rows `bhaskera-r8-batched`).** Decision rule: batching becomes the default only if `bhaskera-r8-batched` has higher req_per_s than `bhaskera-r8-q8_0` at concurrency 64 on at least 6 of the 9 request sets and its p90_ms is not worse on those sets. Result: it wins on 1 of 9 (bench_short_q1 only), so **batching stays off** (`serve.decision.batching.enabled` unchanged). Concurrency 64 per set:
+**Phase B (batching, r8, 36 rows `bhaskera-r8-batched`).** Decision rule: batching becomes the default only if `bhaskera-r8-batched` has higher req_per_s than `bhaskera-r8-q8_0` at concurrency 64 on at least 6 of the 9 request sets and its p90_ms is not worse on those sets. Result: it wins on 1 of 9 (bench_short_q1 only), so **batching stays off** (`serve.decision.batching.enabled` unchanged). Peak GPU memory (max_memory_mib) with batching was 17857 MiB (about 17.8 GB, 17.4 GiB) versus 9793 MiB (about 9.7 GB) unbatched at r8. Concurrency 64 per set:
 
 | request set | unbatched req/s | batched req/s | unbatched p90 ms | batched p90 ms | wins |
 |---|---|---|---|---|---|

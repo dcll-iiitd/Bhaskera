@@ -84,6 +84,38 @@ curl http://localhost:PORT/v1/chat/completions \
 
 ---
 
+## Decision backend (`serve.backend: decision`)
+
+Yes/no (and, for chat models, choice/score) decisions read from one forward pass per question;
+no text is generated. It speaks the Jev wire format, so Jev SDK clients work unchanged.
+Weights (upstream release `jevos-v2`) and the pinned llama.cpp b11081 runtime are fetched and
+verified on the driver before replicas start; see `src/bhaskera/serve/decision/README.md`.
+
+```bash
+uv pip install -e ".[serve,decision]"
+bhaskera-decision-fetch --config configs/serve_jevos.yaml     # optional: download only
+bhaskera-serve --config configs/serve_jevos.yaml --ray-address local
+curl localhost:PORT/v1/systemone -H 'Content-Type: application/json' -d '{
+  "model": "jev-latest", "state": "I was charged twice for the same order.",
+  "questions": {"billing": {"type": "noul", "instructions": "Is this a billing problem?"}}}'
+```
+
+| Endpoint | Returns |
+|---|---|
+| `POST /v1/systemone` | `{"model", "answers": {id: {"type": "noul", "noul": P(yes)}}, "usage"}`; `Server-Timing` header |
+| `GET /v1/models` | served model and its `jev-latest` alias |
+| `GET /health` | `{"status": "ready", "model", "engine": {...metadata, fingerprint...}}` |
+
+Scaling: `num_replicas: N` with `ray_actor_options.num_gpus: auto` puts N llama.cpp contexts
+on one GPU; `serve.decision.batching.enabled` batches concurrent requests inside a replica
+(off by default: it did not pay off in the benchmarks). Measured results:
+`benchmarks/decision/results/SUMMARY.md`; parity with upstream jev:
+`benchmarks/decision/parity/REPORT.md`. The gateway also forwards `/v1/systemone` with API
+keys and per-question Langfuse traces; upstream failures map to 502. Calibrate with
+`bhaskera-calibrate`.
+
+---
+
 ## CLI Reference
 
 ```
@@ -95,7 +127,8 @@ bhaskera-serve --config PATH [OPTIONS]
 | `--config`, `-c` | path | **required** | Path to YAML config file |
 | `--host` | str | from config | Override `serve.host` (e.g. `0.0.0.0`) |
 | `--port` | int | from config | Override `serve.port` |
-| `--backend` | `vllm` / `hf` | from config | Override the serving backend |
+| `--backend` | `vllm` / `hf` / `decision` | from config | Override the serving backend |
+| `--gguf` | str | from config | Override model.gguf (decision backend) |
 | `--num-replicas` | int | from config | Override replica count |
 | `--ray-address` | str | `auto` | Ray cluster address. `auto` = attach to local cluster; `local` = spawn a new single-node cluster; `ray://host:port` = remote cluster |
 | `--log-level` | `DEBUG/INFO/WARNING/ERROR` | `INFO` | Python logging verbosity |

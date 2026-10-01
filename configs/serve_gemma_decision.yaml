@@ -1,5 +1,5 @@
 # Gemma 4 E4B decisions (yes/no, choice, score) on the GPU through llama.cpp.
-#   bhaskera-serve --config configs/serve_jevos.yaml --ray-address local
+#   bhaskera-serve --config configs/serve_gemma_decision.yaml --ray-address local
 #   curl localhost:PORT/v1/systemone -H 'Content-Type: application/json' -d '{"model": "jev-latest",
 #     "state": "I was charged twice.", "questions": {"billing": {"type": "noul",
 #     "instructions": "Is this a billing problem?"}}}'
