@@ -210,7 +210,7 @@ class LlamaBackend:
     ):
         path = Path(path).resolve()
         if not path.is_file():
-            raise ValueError(f"GGUF file not found at {path}. Run `jev download` first.")
+            raise ValueError(f"GGUF file not found at {path}. Fetch it with `bhaskera-decision-fetch --config <yaml>`.")
         if ctx < 1:
             raise ValueError("ctx must be positive")
         if branch not in BRANCH_STRATEGIES:

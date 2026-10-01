@@ -24,6 +24,18 @@ pass per question, reading the answer-token logits; nothing is generated. Ported
   took `inference;dur=7.5, total;dur=14.5` ms (Server-Timing).
 - Fetch without serving: `bhaskera-decision-fetch --config <yaml>`.
 
+## Deployment assumptions
+Single node: provisioning runs on the driver and replicas use its absolute paths (GGUF and
+llama.cpp runtime), so use `--ray-address local`, or a shared filesystem at identical paths
+on every node. The API is unauthenticated; the configs bind `serve.host: 127.0.0.1`, and
+external access should go through the gateway.
+
+Batching: replicas load with the configured `branch` (so `auto` still runs the probe). If the
+backend resolves to anything but seq-copy, or the branch probe delta exceeds 0.05, the replica
+logs a warning and serves through plain `decide` (`loader.batching_supported`).
+Runtime faults (`LlamaRuntimeError`: decode, logits, state, load) answer HTTP 500; request and
+limit problems (`ValueError`) answer 422.
+
 ## Configuration
 `serve.decision` keys (defaults in `src/bhaskera/config.py`):
 

@@ -1,10 +1,10 @@
 # Ported from feder-cr/jev@5be02a3 (MIT); see NOTICE in this directory.
 """Pinned llama.cpp runtime: official prebuilt packages, verified by sha256, one per platform.
 
-Nothing is compiled. `jev download` fetches the release archive that matches this machine
+Nothing is compiled. `bhaskera-decision-fetch` fetches the release archive that matches this machine
 from github.com/ggml-org/llama.cpp and unpacks it under `runtimes/`. The ctypes layouts in
 `llama_cpp.py` are transcribed from the header of exactly this release, so a directory given
-through `JEV_LLAMA_DIR` must hold a build of the same commit.
+through `BHASKERA_LLAMA_DIR` must hold a build of the same commit.
 """
 
 import copy
@@ -228,7 +228,7 @@ def find_library(directory: Path) -> Path | None:
 
 
 def locate(family: str | None = None) -> Path:
-    """Directory holding libllama: `JEV_LLAMA_DIR`, else the installed pinned runtime of the
+    """Directory holding libllama: `BHASKERA_LLAMA_DIR`, else the installed pinned runtime of the
     requested GPU family (`--device vulkan`), else the best one installed."""
     override = os.environ.get(RUNTIME_DIR_ENV)
     if override:

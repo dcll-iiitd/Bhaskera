@@ -91,6 +91,13 @@ no text is generated. It speaks the Jev wire format, so Jev SDK clients work unc
 Weights (upstream release `jevos-v2`) and the pinned llama.cpp b11081 runtime are fetched and
 verified on the driver before replicas start; see `src/bhaskera/serve/decision/README.md`.
 
+Single node: provisioning (`bhaskera-decision-fetch` / `loader.provision`) runs on the driver
+and rewrites the config with absolute paths to the GGUF and the llama.cpp runtime; replicas
+load from those paths. The decision backend therefore assumes a single node: use
+`--ray-address local`, or a shared filesystem mounted at identical paths on every node.
+The API is unauthenticated and the shipped configs bind `serve.host: 127.0.0.1`; use the
+gateway for authenticated external access.
+
 ```bash
 uv pip install -e ".[serve,decision]"
 bhaskera-decision-fetch --config configs/serve_jevos.yaml     # optional: download only

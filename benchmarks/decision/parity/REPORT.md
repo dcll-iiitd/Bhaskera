@@ -3,7 +3,7 @@
 - Date: 2026-09-30
 - Host: A6000 (GPU 0), driver 580, llama.cpp b11081 (161755f) CUDA 13.4 build from Task 8
 - Upstream jev: feder-cr/jev@5be02a3db3b0b32f01c176d8cd122f8c2a8e4db1; weights jevos-v2 (q8_0, q4_k_m)
-- Bhaskera: branch serve-jevos, branch `probe` default (bhaskera-serve, /v1/systemone)
+- Bhaskera: branch serve-jevos, branch `auto` default (resolves to seq-copy for jevos after the probe) (bhaskera-serve, /v1/systemone)
 - Request set: 300 deterministic requests (1100 answers), tolerance 0.01 on |dP(yes)|
 - Gate (amended by the user on 2026-09-30): port fidelity, max |dP(yes)| <= 0.01 between Bhaskera and upstream jev on the same device with the same branch strategy. The original gate (upstream CPU vs Bhaskera CUDA) was dropped because llama.cpp's own CPU vs CUDA drift exceeds 0.01 even for upstream vs itself (0.071 on q8_0). CPU vs GPU drift and seq-copy vs state-restore drift are reported numbers, not gates.
 
@@ -20,7 +20,7 @@
 | upstream CUDA | Bhaskera CUDA (branch=state-restore) | q4_k_m | 1100 | 0.0000 | 0.00000 | 0 | true |
 | upstream CPU | Bhaskera CUDA (branch=state-restore) | q4_k_m | 1100 | 0.1115 | 0.00782 | 11 | false |
 
-Diagnostic (state-restore): upstream's /health reports `branch_strategy: state-restore` (its default), while Bhaskera's default is `probe`/auto. With Bhaskera set to state-restore, its CUDA answers are bit-identical to upstream CUDA (max_delta 0.0, 0 flips, 1100 answers, both quants), so the port itself is exact and the drift in the gate rows is branch-strategy/batching numerics on GPU plus llama.cpp CUDA-vs-CPU numerics; the gate verdict below is unchanged.
+Diagnostic (state-restore): upstream's /health reports `branch_strategy: state-restore` (its default), while Bhaskera's default is `auto` (seq-copy for jevos). With Bhaskera set to state-restore, its CUDA answers are bit-identical to upstream CUDA (max_delta 0.0, 0 flips, 1100 answers, both quants), so the port itself is exact; the non-zero deltas against the default branch are seq-copy vs state-restore numerics on GPU, and the CPU rows add llama.cpp CUDA-vs-CPU numerics. The gate verdict below is unchanged.
 
 Reported drift (not a gate): the original comparison, upstream CPU vs Bhaskera CUDA with the default seq-copy branch, gave max 0.054 / 0.147 (q8_0 / q4_k_m) versus upstream's own CPU vs CUDA drift of 0.071 / 0.112; mean deltas are equal (0.0037 / 0.0078), flips 3 vs 6 (q8_0) and 11 vs 11 (q4_k_m). Seq-copy is Bhaskera's default; the benchmark adds a state-restore run.
 
