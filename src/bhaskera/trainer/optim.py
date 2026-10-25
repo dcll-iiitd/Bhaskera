@@ -11,6 +11,7 @@ Changes vs v1:
 from __future__ import annotations
 
 import logging
+import math
 
 import torch
 import torch.distributed as dist
@@ -115,7 +116,32 @@ def build_optimizer(model: torch.nn.Module, train_cfg) -> torch.optim.Optimizer:
         raise ValueError(f"Unknown optimizer backend: {opt_cfg.backend}")
 
 
+def _global_schedule(optimizer, train_cfg, total_steps: int) -> LRScheduler:
+    """Linear warmup then cosine decay to ``min_lr_ratio`` x peak, over ``total_steps`` GLOBAL steps.
+
+    Federated training restarts the process every round, so a per-run schedule would warm up and
+    decay inside every round. ``step_offset`` places this round on the one global curve.
+    """
+    from torch.optim.lr_scheduler import LambdaLR
+
+    warmup = max(0, int(train_cfg.warmup_steps))
+    offset = int(getattr(train_cfg, "step_offset", 0) or 0)
+    floor = float(getattr(train_cfg, "min_lr_ratio", 0.1))
+
+    def factor(local_step: int) -> float:
+        step = offset + local_step
+        if warmup and step < warmup:
+            return (step + 1) / warmup
+        progress = min(1.0, max(0.0, (step - warmup) / max(1, total_steps - warmup)))
+        return floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    return LambdaLR(optimizer, factor)
+
+
 def build_scheduler(optimizer: torch.optim.Optimizer, train_cfg) -> LRScheduler:
+    total = int(getattr(train_cfg, "total_steps", 0) or 0)
+    if total > 0:
+        return _global_schedule(optimizer, train_cfg, total)
     if train_cfg.warmup_steps <= 0:
         return CosineAnnealingLR(
             optimizer,

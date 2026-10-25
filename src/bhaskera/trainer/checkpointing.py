@@ -52,6 +52,7 @@ def save_and_prune(
         path=ckpt_path,
         extra={"avg_loss": float(avg_loss)},
         cursor_meta=cursor_meta,
+        lora_only=bool(getattr(ckpt_cfg, "lora_only", False)),
     )
 
     # Only rank 0 manages the "best" list on disk.

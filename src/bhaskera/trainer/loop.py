@@ -64,6 +64,16 @@ logger = logging.getLogger(__name__)
 # FSDP2 + DDP gradient-sync helper
 # ---------------------------------------------------------------------------
 
+def token_weighted_loss(micro_losses, micro_tokens):
+    """(token-weighted mean loss, total supervised tokens) over the micro-batches of one optimizer step."""
+    tok = torch.tensor(micro_tokens, dtype=torch.float64)
+    total = int(tok.sum().item())
+    if total == 0:
+        return float("nan"), 0
+    losses = torch.stack([torch.as_tensor(x) for x in micro_losses]).double().cpu()
+    return float((losses * tok).sum().item() / total), total
+
+
 def _set_grad_sync(model: torch.nn.Module, enabled: bool) -> None:
     """
     Toggle gradient all-reduce for the wrapped model.
@@ -329,6 +339,7 @@ def _run_epoch(
         loader_iter = iter(loader)
     while step < train_cfg.max_steps:
         micro_losses: list[torch.Tensor] = []
+        micro_tokens: list[int] = []   # supervised (label != -100) tokens per micro-batch
         micro_aux_losses: list[torch.Tensor] = []
 
         # Reset window accumulators at the start of each optimizer step.
@@ -426,6 +437,12 @@ def _run_epoch(
 
                 out = model(**forward_kwargs)
                 main_loss = out.loss
+                # Number of tokens the loss is actually computed over (HF shifts labels by one).
+                n_supervised = int((labels[:, 1:] != -100).sum().item())
+                if n_supervised == 0:
+                    # A mean over zero tokens is NaN; contribute nothing (but stay in the graph so
+                    # distributed gradient sync still happens on this micro-step).
+                    main_loss = out.logits.float().sum() * 0.0
                 aux_loss = extract_aux_loss(out, profile)
 
                 if aux_loss is not None:
@@ -436,6 +453,7 @@ def _run_epoch(
                 total_loss.backward()
 
             micro_losses.append(main_loss.detach())
+            micro_tokens.append(n_supervised)
             if aux_loss is not None:
                 micro_aux_losses.append(aux_loss.detach())
 
@@ -488,7 +506,11 @@ def _run_epoch(
         scheduler.step()
         optimizer.zero_grad(set_to_none=True)
 
-        window_loss = torch.stack(micro_losses).mean().item()
+        # Token-weighted mean over the whole optimizer step: each micro-batch counts in proportion
+        # to its number of supervised tokens (an unweighted mean of micro-batch means is biased when
+        # packed batches contain different numbers of assistant tokens).
+        window_loss, _sup_tokens = token_weighted_loss(micro_losses, micro_tokens)
+        window_ppl = math.exp(window_loss) if window_loss == window_loss and window_loss < 30 else float("inf")
         window_aux = (
             torch.stack(micro_aux_losses).mean().item()
             if micro_aux_losses
@@ -534,9 +556,10 @@ def _run_epoch(
         # ── Logging ────────────────────────────────────────────────
         if rank == 0:
             msg = (
-                f"[epoch {epoch}][step {step}] loss={window_loss:.4f} "
+                f"[epoch {epoch}][step {step}] loss={window_loss:.6f} ppl={window_ppl:.4f} "
                 f"lr={lr:.2e} grad_norm={grad_norm:.4f} "
-                f"samples={_step_samples_consumed} tokens={_step_tokens_consumed}"
+                f"samples={_step_samples_consumed} tokens={_step_tokens_consumed} "
+                f"sup_tokens={_sup_tokens}"
             )
             if "throughput/tokens_per_sec_global" in throughput_metrics:
                 msg += f" tok/s={throughput_metrics['throughput/tokens_per_sec_global']:.0f}"
@@ -546,6 +569,8 @@ def _run_epoch(
 
         metrics: dict[str, float] = {
             "loss": window_loss,
+            "train_ppl": window_ppl,
+            "supervised_tokens": float(_sup_tokens),
             "lr": lr,
             "grad_norm": grad_norm,
             "epoch": float(epoch),

@@ -49,6 +49,7 @@ bhaskera-diag     = "bhaskera.launcher.diagnostics:main"
 bhaskera-infer    = "bhaskera.launcher.infer:main"
 bhaskera-tokenize = "bhaskera.launcher.tokenize:main"   # fix #28
 bhaskera-dashboard = "bhaskera.launcher.dashboard:main"
+bhaskera-rl       = "bhaskera.launcher.rl_train:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 

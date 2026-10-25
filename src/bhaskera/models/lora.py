@@ -140,6 +140,17 @@ def apply_lora(model: nn.Module, cfg, profile: ModelProfile) -> nn.Module:
                         matched += 1
             logger.info(f"Direct param copy: matched {matched}/{len(sd)} tensors")
 
+    # ── Snapshot the initial LoRA (once) ─────────────────────────────
+    # Federated rounds exchange deltas (new - old). In round 1 there is no "old" adapter on disk, so
+    # without this snapshot the first delta would be the absolute weights, including the random A init.
+    init_path = getattr(cfg.lora, "init_save_path", None)
+    if init_path and not os.path.exists(init_path) and not (resume_path and os.path.exists(resume_path)):
+        init_sd = {k: v.detach().cpu().float().clone() for k, v in model.state_dict().items() if "lora_" in k}
+        os.makedirs(os.path.dirname(os.path.abspath(init_path)), exist_ok=True)
+        torch.save(init_sd, init_path + ".tmp")
+        os.replace(init_path + ".tmp", init_path)
+        logger.info(f"Saved initial LoRA state ({len(init_sd)} tensors) to {init_path}")
+
     # ── Strategy-gated LoRA dtype cast ──────────────────────────────
     # FSDP2 path: cast LoRA (the only trainable) params to base dtype
     # to satisfy uniform-dtype shard-init.

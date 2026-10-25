@@ -113,6 +113,29 @@ def _chunked_causal_lm_loss(logits_fn, labels: torch.Tensor, chunk_seq_len: int)
     return (total_loss / total_count.clamp(min=1)).float()
 
 
+def _chunked_causal_lm_loss_sum(logits_fn, labels: torch.Tensor, chunk_seq_len: int):
+    """Like _chunked_causal_lm_loss but returns (summed NLL in nats, number of scored tokens).
+
+    Corpus-level loss and perplexity need the SUM and the COUNT: averaging per-batch means gives every
+    batch the same weight no matter how many tokens it scored, which biases the result.
+    """
+    seq_len = labels.size(1)
+    total_loss = torch.zeros((), device=labels.device, dtype=torch.float64)
+    total_count = torch.zeros((), device=labels.device, dtype=torch.float64)
+    for start in range(0, seq_len, chunk_seq_len):
+        end = min(start + chunk_seq_len, seq_len)
+        logits_chunk = logits_fn(start, end).float()
+        labels_chunk = labels[:, start:end]
+        loss_chunk = F.cross_entropy(
+            logits_chunk.reshape(-1, logits_chunk.size(-1)), labels_chunk.reshape(-1),
+            ignore_index=-100, reduction="sum",
+        )
+        total_loss += loss_chunk.double()
+        total_count += (labels_chunk != -100).sum().double()
+        del logits_chunk, loss_chunk
+    return total_loss, total_count
+
+
 def run_distributed_validation(
     cfg,
     model,
@@ -152,7 +175,7 @@ def run_distributed_validation(
 
     needs_preds = any(m_name in ["token_accuracy"] for m_name in metric_names)
 
-    local_losses: list[float] = []
+    local_loss_sum, local_token_count = 0.0, 0.0   # exact corpus totals (not batch means)
     local_preds: list[torch.Tensor] = []
     local_labels: list[torch.Tensor] = []
 
@@ -193,18 +216,19 @@ def run_distributed_validation(
                 shift_logits = full_logits[:, :-1, :].contiguous()
                 shift_labels = labels[:, 1:].contiguous()
 
-                loss = _chunked_causal_lm_loss(
+                batch_sum, batch_count = _chunked_causal_lm_loss_sum(
                     logits_fn=lambda s, e: shift_logits[:, s:e, :],
                     labels=shift_labels,
                     chunk_seq_len=LOSS_CHUNK_SEQ_LEN,
                 )
-                local_losses.append(loss.item())
+                local_loss_sum += batch_sum.item()
+                local_token_count += batch_count.item()
 
                 if needs_preds:
                     local_preds.append(shift_logits.argmax(dim=-1).cpu())
                     local_labels.append(shift_labels.cpu())
 
-                del out, full_logits, shift_logits, loss
+                del out, full_logits, shift_logits, batch_sum, batch_count
 
                 if (batch_idx + 1) % MEMORY_CLEANUP_EVERY_N_BATCHES == 0:
                     gc.collect()
@@ -226,16 +250,14 @@ def run_distributed_validation(
         _memory_snapshot(device, rank, "post-optimizer-restore")
 
     if dist.is_available() and dist.is_initialized():
-        sum_loss = torch.tensor(
-            [sum(local_losses), len(local_losses)],
-            dtype=torch.float64,
-            device=device,
-        )
-        dist.all_reduce(sum_loss, op=dist.ReduceOp.SUM)
-        global_loss_sum, global_count = sum_loss.tolist()
-        global_losses = [global_loss_sum / max(1, global_count)] * int(global_count)
+        totals = torch.tensor([local_loss_sum, local_token_count], dtype=torch.float64, device=device)
+        dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+        global_loss_sum, global_count = totals.tolist()
     else:
-        global_losses = local_losses
+        global_loss_sum, global_count = local_loss_sum, local_token_count
+    # One value: the token-weighted mean NLL. The loss/perplexity metrics average the list they get,
+    # so a single-element list makes them exact (perplexity = exp of this value).
+    global_losses = [global_loss_sum / global_count] if global_count > 0 else []
 
     results = {}
     if rank == 0:

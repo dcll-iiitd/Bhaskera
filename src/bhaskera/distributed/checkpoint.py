@@ -112,6 +112,7 @@ def save_checkpoint(
     rank: int = 0,
     keep_last_n: int = 3,
     cursor_meta: dict | None = None,
+    lora_only: bool = False,
 ) -> None:
     """
     Save a sharded checkpoint atomically.
@@ -135,6 +136,9 @@ def save_checkpoint(
         extra:       Optional metadata dict merged into meta.json.
         rank:        Global rank of this worker.
         keep_last_n: Number of completed checkpoints to retain.
+        lora_only:   Skip frozen (base-model) parameters in the model state, so a
+                     LoRA checkpoint holds only the adapter instead of a full
+                     copy of the base weights. Same layout, same loader.
     """
     tmp_path = path + ".tmp"
 
@@ -150,7 +154,10 @@ def save_checkpoint(
         dist.barrier()
 
     options = StateDictOptions(full_state_dict=False, cpu_offload=True)
-    model_sd = get_model_state_dict(model, options=options)
+    model_options = StateDictOptions(
+        full_state_dict=False, cpu_offload=True, ignore_frozen_params=lora_only
+    )
+    model_sd = get_model_state_dict(model, options=model_options)
     optim_sd = get_optimizer_state_dict(model, optimizer, options=options)
 
     _dcp_save({"model": model_sd}, os.path.join(tmp_path, "model"))

@@ -45,6 +45,7 @@ class LoraConfig:
     freeze_router: bool = True
     modules_to_save: list[str] = field(default_factory=list)
     resume_path: Optional[str] = None
+    init_save_path: Optional[str] = None   # write the freshly initialised LoRA here (once)
 
 
 @dataclass
@@ -179,9 +180,37 @@ class TrainingConfig:
     resume_tokens: int = 0
     
     grad_clip: Optional[float] = 1.0          # Phase 1: used by no_sync loop
+    # Global LR schedule across federated rounds: one warmup, one cosine decay over `total_steps`.
+    # `step_offset` is the number of optimizer steps taken in earlier rounds. 0 = per-run schedule.
+    total_steps: int = 0
+    step_offset: int = 0
+    min_lr_ratio: float = 0.1
     max_grad_skip_steps: int = 100
     distributed: DistributedConfig = field(default_factory=DistributedConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
+
+
+@dataclass
+class RLConfig:
+    """Post-training RL (GRPO with verifiable rewards). See bhaskera/rl/README.md."""
+    train_path: Optional[str] = None      # JSONL: {"prompt": ..., "answer": ...}
+    eval_path: Optional[str] = None       # held-out JSONL, same format
+    reward: str = "math_boxed"            # name in bhaskera.rl.rewards registry
+    system_prompt: str = (
+        "Solve the problem step by step. "
+        "Put the final numerical answer in \\boxed{}."
+    )
+    group_size: int = 8                   # completions sampled per prompt (G >= 2)
+    prompts_per_step: int = 8             # prompts per optimizer step
+    max_new_tokens: int = 256
+    temperature: float = 1.0
+    kl_coef: float = 0.04                 # beta; 0 disables the reference forward pass
+    clip_eps: float = 0.2                 # PPO-style ratio clipping
+    epochs_per_rollout: int = 1           # optimizer steps taken on each rollout batch
+    micro_batch_size: int = 8             # sequences per forward/backward pass
+    eval_every: int = 0                   # steps between held-out evals; 0 = only at the end
+    eval_max_prompts: int = 200
+    eval_batch_size: int = 32             # prompts decoded together during evaluation
 
 
 @dataclass
@@ -190,6 +219,7 @@ class CheckpointConfig:
     save_dir: str = "./checkpoints"
     save_interval: int = 1
     keep_last_n: int = 2
+    lora_only: bool = False    # save only the LoRA weights (not the frozen base model)
 
 
 @dataclass
@@ -244,6 +274,7 @@ class Config:
     evaluation: EvaluationConfig  = field(default_factory=EvaluationConfig)
     monitoring: MonitoringConfig  = field(default_factory=MonitoringConfig)
     plugins: PluginsConfig        = field(default_factory=PluginsConfig)
+    rl: RLConfig                  = field(default_factory=RLConfig)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -292,8 +323,29 @@ def _dict_to_config(raw: dict) -> Config:
     metrics_raw = _get(raw, "monitoring", "metrics",    default={}) or {}
     
     plugins_raw = _get(raw, "plugins", default={}) or {}
+    rl_raw      = _get(raw, "rl", default={}) or {}
+    _rl_defaults = RLConfig()
 
     return Config(
+        rl=RLConfig(
+            train_path=rl_raw.get("train_path"),
+            eval_path=rl_raw.get("eval_path"),
+            reward=str(rl_raw.get("reward", _rl_defaults.reward)),
+            system_prompt=str(rl_raw.get("system_prompt", _rl_defaults.system_prompt)),
+            group_size=int(rl_raw.get("group_size", _rl_defaults.group_size)),
+            prompts_per_step=int(rl_raw.get("prompts_per_step", _rl_defaults.prompts_per_step)),
+            max_new_tokens=int(rl_raw.get("max_new_tokens", _rl_defaults.max_new_tokens)),
+            temperature=float(rl_raw.get("temperature", _rl_defaults.temperature)),
+            kl_coef=float(rl_raw.get("kl_coef", _rl_defaults.kl_coef)),
+            clip_eps=float(rl_raw.get("clip_eps", _rl_defaults.clip_eps)),
+            epochs_per_rollout=int(
+                rl_raw.get("epochs_per_rollout", _rl_defaults.epochs_per_rollout)
+            ),
+            micro_batch_size=int(rl_raw.get("micro_batch_size", _rl_defaults.micro_batch_size)),
+            eval_every=int(rl_raw.get("eval_every", _rl_defaults.eval_every)),
+            eval_max_prompts=int(rl_raw.get("eval_max_prompts", _rl_defaults.eval_max_prompts)),
+            eval_batch_size=int(rl_raw.get("eval_batch_size", _rl_defaults.eval_batch_size)),
+        ),
         plugins=PluginsConfig(
             optimizers=list(plugins_raw.get("optimizers", []))
         ),
@@ -333,7 +385,7 @@ def _dict_to_config(raw: dict) -> Config:
         ),
         lora=LoraConfig(
             enabled=bool(lora_raw.get("enabled", False)),
-            r=int(lora_raw.get("r", 16)),
+            r=int(lora_raw.get("r", lora_raw.get("rank", 16))),   # "rank" is the PEFT name
             alpha=int(lora_raw.get("alpha", 32)),
             dropout=float(lora_raw.get("dropout", 0.05)),
             target_modules=list(lora_raw.get("target_modules", ["auto"])),
@@ -341,6 +393,7 @@ def _dict_to_config(raw: dict) -> Config:
             freeze_router=bool(lora_raw.get("freeze_router", True)),
             modules_to_save=list(lora_raw.get("modules_to_save", [])),
             resume_path=lora_raw.get("resume_path"),
+            init_save_path=lora_raw.get("init_save_path"),
         ),
         moe=MoEConfig(
             aux_loss_weight=float(moe_raw.get("aux_loss_weight", 0.01)),
@@ -363,6 +416,9 @@ def _dict_to_config(raw: dict) -> Config:
             resume_samples=int(train_raw.get("resume_samples", 0)),
             resume_tokens=int(train_raw.get("resume_tokens", 0)),
             grad_clip=train_raw.get("grad_clip", 1.0),
+            total_steps=int(train_raw.get("total_steps", 0)),
+            step_offset=int(train_raw.get("step_offset", 0)),
+            min_lr_ratio=float(train_raw.get("min_lr_ratio", 0.1)),
             max_grad_skip_steps=int(train_raw.get("max_grad_skip_steps", 100)),
             optimizer=OptimizerConfig(
                 backend=str(opt_raw.get("backend", "default")),
@@ -398,6 +454,7 @@ def _dict_to_config(raw: dict) -> Config:
             save_dir=str(ckpt_raw.get("save_dir", "./checkpoints")),
             save_interval=int(ckpt_raw.get("save_interval", 1)),
             keep_last_n=int(ckpt_raw.get("keep_last_n", 2)),
+            lora_only=bool(ckpt_raw.get("lora_only", False)),
         ),
         logging=LoggingConfig(
             tracker=log_raw.get("tracker"),
