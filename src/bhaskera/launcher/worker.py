@@ -34,18 +34,22 @@ def worker_fn(cfg_dict: dict) -> None:
 
     cfg = Config.from_dict(cfg_dict)
 
+    from bhaskera.utils.device import apply_cpu_overrides, use_cuda, worker_device
+    apply_cpu_overrides(cfg)   # no-op on GPU hosts
+
     load_plugins(cfg)
     ray_ctx    = ray.train.get_context()
     local_rank = ray_ctx.get_local_rank()
     rank       = ray_ctx.get_world_rank()
     world_size = ray_ctx.get_world_size()
 
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
+    device = worker_device(local_rank)
+    if device.type == "cuda":
+        torch.cuda.set_device(local_rank)
 
     _seed_everything(cfg.training.seed, rank, cfg.training.deterministic)
 
-    logger.info(f"[rank {rank}/{world_size}] GPU {local_rank} ready")
+    logger.info(f"[rank {rank}/{world_size}] {device} ready")
 
     dataset = ray.train.get_dataset_shard("train")
     
@@ -92,7 +96,8 @@ def worker_fn(cfg_dict: dict) -> None:
 def _seed_everything(base_seed: int, rank: int, deterministic: bool) -> None:
     seed = int(base_seed) + int(rank)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     random.seed(seed)
     np.random.seed(seed)
 

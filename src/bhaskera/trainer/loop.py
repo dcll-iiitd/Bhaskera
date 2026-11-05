@@ -125,7 +125,8 @@ def train(
                             If None (e.g. single-GPU debug without Ray), the old
                             in-line eval path is used as a fallback.
     """
-    device = torch.device(f"cuda:{local_rank}")
+    from bhaskera.utils.device import worker_device
+    device = worker_device(local_rank)
     train_cfg = cfg.training
     ckpt_cfg = cfg.checkpoint
 

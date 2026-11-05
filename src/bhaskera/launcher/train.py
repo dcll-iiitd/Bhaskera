@@ -48,6 +48,9 @@ def main() -> None:
     if args.resume_tokens:
         cfg.training.resume_tokens = args.resume_tokens
 
+    from bhaskera.utils.device import apply_cpu_overrides, use_cuda
+    apply_cpu_overrides(cfg)   # no-op on GPU hosts; CPU-safe config otherwise
+
     monitoring = setup_monitoring(cfg)
 
     _init_ray(monitoring)
@@ -55,7 +58,7 @@ def main() -> None:
     logger.info(monitoring.banner())
 
     num_workers = args.num_workers or _count_gpus()
-    logger.info(f"Launching with {num_workers} GPU worker(s)")
+    logger.info(f"Launching with {num_workers} {'GPU' if use_cuda() else 'CPU'} worker(s)")
 
     ray_dataset = build_ray_dataset(cfg, world_size=num_workers)
 
@@ -78,6 +81,9 @@ def main() -> None:
     # Ray Data operators (like Repartition/AllToAll) require extra unallocated CPUs to run.
     # We guarantee a safety cushion of either the YAML workers or 16 CPUs, whichever is larger.
     data_cushion = max(data_workers, 16)
+    if not use_cuda():
+        # Laptop-class CPU: never reserve more than half the cores.
+        data_cushion = min(data_cushion, max(1, total_cpus // 2))
     
     # Reserve the cushion, then divide the remainder among the GPU training workers
     available_cpus = max(1, total_cpus - data_cushion)
@@ -95,11 +101,12 @@ def main() -> None:
         datasets=datasets_dict,
         scaling_config=ScalingConfig(
             num_workers=num_workers,
-            use_gpu=True,
-            resources_per_worker={
-                "GPU": 1,
-                "CPU": cpus_per_worker,  # Dynamically bounded to guarantee headroom
-            },
+            use_gpu=use_cuda(),
+            resources_per_worker=(
+                {"GPU": 1, "CPU": cpus_per_worker}  # Dynamically bounded to guarantee headroom
+                if use_cuda()
+                else {"CPU": cpus_per_worker}
+            ),
         ),
         run_config=RunConfig(
             name=cfg.logging.run_name,
@@ -132,10 +139,10 @@ def _init_ray(monitoring) -> None:
         n_gpus = _count_gpus()
         logger.info(f"Starting local Ray cluster ({n_gpus} GPU(s))")
 
-        init_kwargs = {
-            "num_cpus": os.cpu_count(),
-            "num_gpus": n_gpus,
-        }
+        from bhaskera.utils.device import use_cuda
+        init_kwargs = {"num_cpus": os.cpu_count()}
+        if use_cuda():
+            init_kwargs["num_gpus"] = n_gpus
         init_kwargs.update(monitoring.ray_init_kwargs())
         ray.init(**init_kwargs)
 
@@ -157,6 +164,7 @@ def _parse_args() -> argparse.Namespace:
 
 def _count_gpus() -> int:
     import torch
+    from bhaskera.utils.device import use_cuda
     slurm_nodes = int(os.environ.get("SLURM_NNODES", 0))
     slurm_gpus  = int(os.environ.get("SLURM_GPUS_PER_NODE", 0))
 
@@ -165,6 +173,9 @@ def _count_gpus() -> int:
         logger.info(f"SLURM GPU count: {slurm_nodes} nodes × {slurm_gpus} GPUs/node = {total} total")
         return total
 
+    from bhaskera.utils.device import use_cuda
+    if not use_cuda():
+        return 1  # CPU mode: a single CPU worker process
     n = torch.cuda.device_count()
     if n == 0:
         raise RuntimeError("No GPUs found.")

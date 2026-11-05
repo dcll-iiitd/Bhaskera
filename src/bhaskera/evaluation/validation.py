@@ -137,7 +137,8 @@ def run_distributed_validation(
         logger.warning("Validation enabled but val_dataset is None. Skipping.")
         return {}
 
-    device = torch.device(f"cuda:{torch.cuda.current_device()}")
+    device = (torch.device(f"cuda:{torch.cuda.current_device()}")
+              if torch.cuda.is_available() else torch.device("cpu"))
     was_training = model.training
     model.eval()
 

@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import logging
 
+import torch
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from bhaskera.introspect import ModelProfile
+from bhaskera.utils.device import use_cuda
 from .activation_ckpt import apply_activation_checkpointing
 
 logger = logging.getLogger(__name__)
@@ -66,12 +68,13 @@ def wrap_ddp(model: nn.Module, cfg, local_rank: int, profile: ModelProfile) -> n
     # NB: split the .to(local_rank) and DDP() onto separate statements
     # so AC's hook installation has already completed on the CPU/GPU
     # module before DDP snapshots the param graph.
-    model = model.to(local_rank)
+    on_cuda = torch.cuda.is_available() and use_cuda()
+    model = model.to(local_rank if on_cuda else "cpu")
 
     wrapped = DDP(
         model,
-        device_ids=[local_rank],
-        output_device=local_rank,
+        device_ids=[local_rank] if on_cuda else None,
+        output_device=local_rank if on_cuda else None,
         find_unused_parameters=find_unused,
         gradient_as_bucket_view=ddp_cfg.gradient_as_bucket_view,
         broadcast_buffers=ddp_cfg.broadcast_buffers,
