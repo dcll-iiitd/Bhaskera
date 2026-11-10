@@ -48,6 +48,8 @@ bhaskera-train    = "bhaskera.launcher.train:main"
 bhaskera-diag     = "bhaskera.launcher.diagnostics:main"
 bhaskera-infer    = "bhaskera.launcher.infer:main"
 bhaskera-tokenize = "bhaskera.launcher.tokenize:main"   # fix #28
+bhaskera-train-cpu    = "bhaskera.launcher.train_cpu:main"      # Ray-free CPU/laptop trainer
+bhaskera-tokenize-cpu = "bhaskera.launcher.tokenize_cpu:main"  # Ray-free tokenizer
 bhaskera-dashboard = "bhaskera.launcher.dashboard:main"
 [tool.setuptools.packages.find]
 where = ["src"]

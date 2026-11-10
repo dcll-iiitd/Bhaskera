@@ -15,8 +15,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
-import ray.data
 import torch.distributed as dist
+
+try:  # Ray is optional: the CPU/laptop path (launcher/tokenize_cpu.py) never needs it.
+    import ray.data
+except ImportError:  # pragma: no cover
+    ray = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 

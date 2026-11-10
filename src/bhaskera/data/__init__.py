@@ -9,10 +9,18 @@ Ray Data–native dataset pipeline. Sub-modules:
 """
 from __future__ import annotations
 
-from .registry import REGISTRY, register, build_ray_dataset
+try:
+    from .registry import REGISTRY, register, build_ray_dataset
 
-# Importing the datasets package triggers each @register decorator so the
-# built-in keys ("ultrachat", "openassistant", "redpajama") appear in REGISTRY.
-from . import datasets  # noqa: F401
+    # Importing the datasets package triggers each @register decorator so the
+    # built-in keys ("ultrachat", "openassistant", "redpajama") appear in REGISTRY.
+    from . import datasets  # noqa: F401
 
-__all__ = ["REGISTRY", "register", "build_ray_dataset"]
+    __all__ = ["REGISTRY", "register", "build_ray_dataset"]
+except ImportError as _e:  # Ray not installed (CPU-only / laptop mode)
+    if "ray" not in str(_e).lower():
+        raise
+    # The Ray-backed registry is unavailable, but Ray-free submodules such as
+    # ``bhaskera.data.formats`` and ``bhaskera.data.tokenize.TokenizerActor``
+    # (used by launcher/tokenize_cpu.py and launcher/train_cpu.py) still import.
+    __all__ = []
