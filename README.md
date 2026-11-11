@@ -2,7 +2,7 @@
 
 Ray-native distributed LLM training and inference framework.
 
-Bhaskera wraps PyTorch's FSDP2 / DDP, HuggingFace `transformers`, PEFT-based LoRA / QLoRA, and a persistent Ray Data tokenisation pipeline behind a YAML-driven CLI. It targets supervised fine-tuning and continual pre-training of dense and Mixture-of-Experts (MoE) causal language models on single-node and multi-node SLURM clusters, with built-in MLflow and Ray Dashboard observability.
+Bhaskera wraps PyTorch's FSDP2 / DDP, HuggingFace `transformers`, PEFT-based LoRA / QLoRA, and a persistent Ray Data tokenisation pipeline behind a YAML-driven CLI. It targets supervised fine-tuning, post-training reinforcement learning (GRPO) and continual pre-training of dense and Mixture-of-Experts (MoE) causal language models on single-node and multi-node SLURM clusters, with built-in MLflow and Ray Dashboard observability.
 
 Version: `2.2.0` (Python `>=3.11`).
 
@@ -13,6 +13,7 @@ Version: `2.2.0` (Python `>=3.11`).
 - **LoRA fine-tuning** via PEFT, with strategy-gated dtype handling (cast to base dtype under FSDP2 to satisfy uniform-shard-init; fp32 master weights under DDP).
 - **QLoRA fine-tuning** — BitsAndBytes NF4 4-bit quantization of the base model with full-precision LoRA adapters. DDP-only (`model.quantization: qlora`). Fails fast with a clear error if FSDP is accidentally configured.
 - **Continual Pre-Training (CPT)** — `data.is_cpt: true` activates the continuous sequence-packing loader (`local_cpt`), which reads raw JSONL corpora and packs tokens into fixed-length chunks with no padding waste.
+- **Post-training RL (GRPO)** — `bhaskera-rl` improves a LoRA adapter from a verifiable reward (e.g. correct final answer) with no value network or reward model. Single GPU. See [Post-training RL](#post-training-rl-grpo) and `src/bhaskera/rl/README.md`.
 - **Persistent tokenisation cache** — `bhaskera-tokenize` writes Parquet shards keyed by `(model_name, seq_len, dataset_name, format, format_options)`; training reads the cache directly.
 - **Pluggable chat formats** — built-in renderers for `chatml`, `alpaca`, `sharegpt`; custom formats register via `@register_format`.
 - **DCP-based sharded checkpointing** with atomic `.complete` sentinel, version-aware between PyTorch < 2.5 and ≥ 2.5.
@@ -29,7 +30,8 @@ Version: `2.2.0` (Python `>=3.11`).
 Bhaskera-qlora/
 ├── configs/                      # YAML run configs (one per scenario)
 ├── scripts/
-│   └── submit.sh                 # SLURM submission script
+│   ├── submit.sh                 # SLURM submission script
+│   └── prepare_gsm8k_rl.py       # GSM8K -> JSONL prompts for bhaskera-rl
 ├── src/bhaskera/
 │   ├── config.py                 # dataclass schema + YAML loader
 │   ├── introspect.py             # ModelProfile auto-detection
@@ -38,6 +40,7 @@ Bhaskera-qlora/
 │   ├── launcher/                 # CLI entry points
 │   ├── models/                   # HF loader + LoRA + QLoRA quantization
 │   ├── trainer/                  # training loop, MoE, optim, eval lifecycle
+│   ├── rl/                       # GRPO post-training: trainer, rollout, rewards, data, tests
 │   ├── evaluation/               # Evaluator, distributed validation, benchmarks
 │   ├── plugins/                  # built-in metrics, benchmarks, optimizers
 │   └── utils/                    # telemetry + experiment trackers
@@ -76,6 +79,7 @@ Declared in `pyproject.toml` under `[project.scripts]`:
 | `bhaskera-infer` | `bhaskera.launcher.infer` | Single-prompt or batch generation from a checkpoint |
 | `bhaskera-diag` | `bhaskera.launcher.diagnostics` | NCCL all-reduce + bandwidth check |
 | `bhaskera-dashboard` | `bhaskera.launcher.dashboard` | Start / stop the MLflow UI on the login node |
+| `bhaskera-rl` | `bhaskera.launcher.rl_train` | GRPO post-training from a verifiable reward (single GPU) |
 
 ## Configuration
 
@@ -86,6 +90,7 @@ All runs are driven by a single YAML file passed via `--config`. The schema is d
 - `data` — dataset name, sequence length, `is_cpt` flag for CPT, tokenizer cache paths, format renderer, local source paths
 - `lora` — rank, alpha, dropout, target modules (`["auto"]` triggers introspection), MoE knobs
 - `moe` — aux loss weights, router freezing, expert utilisation logging
+- `rl` — GRPO settings (prompt files, reward, `group_size`, `prompts_per_step`, `kl_coef`, ...); used only by `bhaskera-rl`
 - `training` — batch size, gradient accumulation, LR schedule, distributed strategy block
 - `training.optimizer` — `backend: "default"|"torch"|"plugin"`, `class_name` (for built-in torch), `name` (for plugin), `kwargs`
 - `training.distributed` — `strategy: fsdp | ddp` plus an `fsdp` and `ddp` sub-block
@@ -110,6 +115,7 @@ See `configs/` for working examples:
 | `lion.yaml` | CPT with Lion optimizer plugin (`backend: plugin`) |
 | `cpt_token.yaml` | Tokenize a CPT JSONL corpus |
 | `tokenize.yaml` | Tokenize UltraChat with Param2 tokenizer |
+| `rl_gsm8k.yaml` | GRPO on GSM8K, Qwen2.5-0.5B-Instruct + LoRA, single GPU |
 | `tokenize_qwen.yaml` | Tokenize UltraChat with Qwen2.5 tokenizer |
 
 ## Typical workflow
@@ -121,6 +127,30 @@ See `configs/` for working examples:
 3. **Train.** `bhaskera-train --config configs/your_run.yaml --num-workers <N>`. On SLURM, `scripts/submit.sh` bootstraps the Ray cluster and forwards to the same command.
 4. **Monitor.** Start `bhaskera-dashboard` on the login node for the MLflow UI; Ray Dashboard is exposed on `monitoring.dashboard_port` (default 8265).
 5. **Infer.** `bhaskera-infer --config configs/inference.yaml --prompt "..."`.
+
+### Post-training RL (GRPO)
+
+Trains a LoRA adapter from a **verifiable reward** instead of labelled completions. Each step the model samples `group_size` answers per prompt, a plain function scores each one, and the model is updated to make the better answers within each group more likely (group-relative advantage, PPO-clipped loss, optional KL penalty to the frozen base model). The base model never changes; only the adapter trains, and the KL reference is the same network with the adapter switched off.
+
+```bash
+bash setup.sh && source bhaskera-activate.sh
+python scripts/prepare_gsm8k_rl.py --out-dir data/gsm8k        # downloads GSM8K, writes train.jsonl / test.jsonl
+bhaskera-rl --config configs/rl_gsm8k.yaml                     # Qwen2.5-0.5B-Instruct, 100 steps
+pytest src/bhaskera/rl/tests src/bhaskera/tests -v             # trainer tests (pytest is a dev extra)
+```
+
+Requirements and limits: `lora.enabled: true` is mandatory; single GPU (`--num-workers` other than 1 is ignored with a warning); rollouts use plain HuggingFace `generate`; W&B / MLflow are not wired into the RL loop (progress goes to stdout). The built-in reward is `math_boxed` (final `\boxed{}` answer matches the gold answer); register your own with `@register_reward`. Full reference: [`src/bhaskera/rl/README.md`](src/bhaskera/rl/README.md).
+
+Note: `configs/rl_gsm8k.yaml` ships conservative defaults (lr 1e-5, 100 steps, `max_new_tokens` 320); the numbers below come from longer runs with the learning rates shown and `max_new_tokens: 512`, whose exact configs are in the Slakshna repo's `results/rl_long_run_2026-10-22/single_node/*/cfg.yaml`.
+
+Measured with this trainer (GSM8K, greedy decoding, full 1,319-problem test set, one run per row; raw logs in the Slakshna repo under `results/rl_long_run_2026-10-22/`):
+
+| Model | LR | KL coef | Accuracy before | After 240 steps |
+|---|---|---|---|---|
+| Qwen2.5-0.5B-Instruct | 5e-5 | 0.04 | 44.1% | 49.6% |
+| Qwen2.5-1.5B-Instruct | 5e-5 | 0.04 | 68.8% | 73.6% |
+
+Inside the Slakshna federated system (`federated.mode: "rl"`), this same trainer produces the per-round LoRA delta that nodes exchange; see the Slakshna repository's `RL` branch.
 
 ### Continual Pre-Training (CPT)
 
